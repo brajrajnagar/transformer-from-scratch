@@ -140,6 +140,41 @@ class MultiHeadAttention(nn.Module):
         self.d_model = d_model
         self.n_heads = n_heads
         self.d_k = d_model // n_heads  # Dimension of each head
+        #
+        # WHY d_k = d_model // n_heads?
+        # ─────────────────────────────
+        #
+        # The MULTI-HEAD attention splits the d_model dimensions ACROSS the heads.
+        #
+        # Think of it like splitting a deck of cards:
+        #   Total cards = d_model = 512
+        #   Players = n_heads = 8
+        #   Cards per player = d_k = 512 / 8 = 64
+        #
+        # Each head operates independently in its own d_k-dimensional space.
+        # Then we concatenate all heads back together: n_heads × d_k = d_model
+        #
+        # EXAMPLE with d_model=512, n_heads=8:
+        #   d_k = 512 // 8 = 64
+        #   Head 1: operates in dimensions [0:64]
+        #   Head 2: operates in dimensions [64:128]
+        #   Head 3: operates in dimensions [128:192]
+        #   ...
+        #   Head 8: operates in dimensions [448:512]
+        #
+        # After attention, we concatenate: [head1, head2, ..., head8] → 8×64 = 512
+        #
+        # WHY NOT use all d_model dimensions for each head?
+        #   That would mean all heads see the SAME full representation.
+        #   By splitting, each head sees a DIFFERENT projection → more diverse patterns.
+        #
+        # WHY NOT use more heads with same d_k?
+        #   You CAN! But then n_heads × d_k > d_model, which breaks the architecture.
+        #   The constraint is: n_heads × d_k = d_model (total dimensions must match).
+        #
+        # So when d_model is fixed, more heads → smaller d_k → less detail per head
+        # but more diverse perspectives. Fewer heads → larger d_k → more detail per head
+        # but potentially less diverse patterns.
 
         # Linear projections for Q, K, V and the final output
         self.W_Q = nn.Linear(d_model, d_model)
