@@ -6,33 +6,33 @@ Training on a REAL dataset: IWSLT (ACL International Workshop on Language
 Resources and Language Translation) Vietnamese-English corpus.
 
 DATASET STATS:
-  Training: ~130,000 sentence pairs
-  Validation: ~1,500 sentence pairs
-  Test: ~1,500 sentence pairs
+  Training: ~133,317 sentence pairs
+  Validation: ~1,553 sentence pairs
+  Test: ~1,268 sentence pairs
 
 WHAT YOU'LL LEARN:
-  1. Subword tokenization (Byte Pair Encoding)
-  2. Real dataset downloading via HuggingFace datasets library
+  1. Subword tokenization with HuggingFace tokenizers (BPE)
+  2. Loading real translation data from files
   3. Proper data loading with batching and padding
   4. Learning rate scheduling (warmup + cosine decay)
   5. Gradient clipping for stable training
-  6. BLEU score evaluation metric
-  7. Greedy decoding
+  6. Greedy decoding
 
 HOW TO RUN:
-  # Full dataset (requires GPU for reasonable training time):
+  # Full dataset with HuggingFace tokenizers:
   python 08_iwslt_vi_en.py --full
 
   # Demo mode with small subset (works on CPU):
   python 08_iwslt_vi_en.py --demo
 
   # First install dependencies:
-  pip install datasets tqdm
+  pip install tokenizers tqdm
 """
 
 import argparse
 import math
 import os
+import pickle
 import random
 import sys
 from collections import Counter
@@ -41,69 +41,144 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
+
+try:
+    from tokenizers import Tokenizer, models, pre_tokenizers, trainers
+    from tokenizers.normalizers import Normalizer, Sequence
+    from tokenizers.pre_tokenizers import Whitespace
+    HAS_TOKENIZERS = True
+except ImportError:
+    HAS_TOKENIZERS = False
+    print("WARNING: 'tokenizers' library not installed.")
+    print("Install with: pip install tokenizers")
+    print("Falling back to simple BPE implementation...")
+
+
+CHECKPOINT_PATH = "best_iwslt_transformer.pth"
+
+
+def tokenizer_paths():
+    """Paths for the en/vi tokenizers — .json for HF, .pkl for the simple fallback."""
+    ext = "json" if HAS_TOKENIZERS else "pkl"
+    return f"en_tokenizer.{ext}", f"vi_tokenizer.{ext}"
 
 
 # ============================================================================
-# BYTE PAIR ENCODING (BPE) TOKENIZER
+# HUGGINGFACE BPE TOKENIZER WRAPPER
 # ============================================================================
 
-class BytePairEncoder:
+class HuggingFaceBPE:
     """
-    Byte Pair Encoding (BPE) tokenization.
+    Wrapper around HuggingFace's tokenizers.BPE for easy training and encoding.
 
-    BPE is a subword tokenization algorithm that:
-    1. Starts with individual characters as the base vocabulary
-    2. Iteratively merges the most frequent pairs of adjacent symbols
-    3. Creates a compact representation that balances vocabulary size
-       and ability to handle out-of-vocabulary words
+    WHY USE HUGGINGFACE TOKENIZERS?
+    ───────────────────────────────
+    1. Well-tested and optimized implementation
+    2. Proper handling of special tokens
+    3. Supports multiple tokenization algorithms (BPE, WordPiece, Unigram)
+    4. Fast encoding/decoding
+    5. Can save/load tokenizer configuration
 
-    WHY BPE INSTEAD OF WORD-BASED?
-    ──────────────────────────────
-    Word-based tokenization has a problem: rare/unseen words need <UNK> tokens.
-    BPE solves this by breaking words into subword units.
+    BPE (Byte Pair Encoding) works by:
+    1. Starting with characters as the base vocabulary
+    2. Iteratively merging the most frequent adjacent pairs
+    3. Creating a compact vocabulary that handles OOV words
 
     Example:
       "unhappiness" → ["un", "happi", "ness"]
-      Even if "unhappiness" was never seen, BPE can break it into known subwords.
-
-    This is why BPE is used in modern NLP models (BERT, GPT, etc.).
-
-    HOW BPE TRAINING WORKS:
-    ───────────────────────
-    Step 1: Split all words into characters + add <w> word boundary marker
-      "low" → ['l', 'o', 'w', '<w>']
-      "lower" → ['l', 'o', 'w', 'e', 'r', '<w>']
-      "newest" → ['n', 'e', 'w', 'e', 's', 't', '<w>']
-
-    Step 2: Count adjacent pairs across ALL words
-      ('l', 'o'): 2 words
-      ('o', 'w'): 2 words
-      ('w', 'e'): 2 words
-      ('e', 'r'): 1 word
-      ...
-
-    Step 3: Merge the most frequent pair → create new symbol
-      Most frequent: ('o', 'w') → new symbol "ow"
-
-    Step 4: Repeat until vocabulary limit reached
-
-    RESULT: The model learns that "ow" commonly appears together,
-    then "low" becomes a single token, etc.
+      Even if "unhappiness" was never seen, BPE breaks it into known subwords.
     """
 
-    def __init__(self, max_vocab_size: int = 8000):
-        self.max_vocab_size = max_vocab_size
-        self.symbols = []      # List of symbol strings
-        self.symbols_to_id = {}  # symbol -> id mapping
-        self.merges = []       # List of (pair1, pair2) merge rules
+    def __init__(self, vocab_size: int = 8000):
+        self.vocab_size = vocab_size
+        self.tokenizer = None
+        self.special_tokens = ["<pad>", "<unk>", "<bos>", "<eos>"]
+
+    def train(self, files: list[str]):
+        """
+        Train BPE tokenizer on text files.
+
+        Args:
+            files: List of file paths to train on
+        """
+        if not HAS_TOKENIZERS:
+            raise ImportError("HuggingFace tokenizers library required")
+
+        # Initialize empty tokenizer
+        self.tokenizer = Tokenizer(models.BPE(unk_token="<unk>"))
+
+        # Configure pre-tokenization (split on whitespace first)
+        self.tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+
+        # Create trainer
+        trainer = trainers.BpeTrainer(
+            vocab_size=self.vocab_size,
+            special_tokens=self.special_tokens,
+            show_progress=True,
+            initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
+        )
+
+        # Train on files
+        print(f"  Training on {len(files)} file(s)...")
+        self.tokenizer.train(files, trainer=trainer)
+
+        print(f"  Final vocabulary size: {self.tokenizer.get_vocab_size()}")
+
+    def encode(self, text: str) -> list[int]:
+        """Encode text to token IDs."""
+        if self.tokenizer is None:
+            raise ValueError("Tokenizer not trained yet")
+        encoding = self.tokenizer.encode(text)
+        return encoding.ids
+
+    def decode(self, ids: list[int]) -> str:
+        """Decode token IDs back to text."""
+        if self.tokenizer is None:
+            raise ValueError("Tokenizer not trained yet")
+        return self.tokenizer.decode(ids)
+
+    @property
+    def vocab_len(self) -> int:
+        """Get vocabulary length."""
+        if self.tokenizer is None:
+            return 0
+        return self.tokenizer.get_vocab_size()
+
+    def get_vocab_size(self) -> int:
+        """Get vocabulary size."""
+        return self.vocab_len
+
+    def save(self, path: str):
+        """Save tokenizer to file."""
+        if self.tokenizer:
+            self.tokenizer.save(path)
+
+    def load(self, path: str):
+        """Load tokenizer from file."""
+        if HAS_TOKENIZERS:
+            self.tokenizer = Tokenizer.from_file(path)
+
+
+# ============================================================================
+# SIMPLE BPE TOKENIZER (fallback if tokenizers not installed)
+# ============================================================================
+
+class SimpleBPE:
+    """Simple BPE implementation as fallback."""
+
+    def __init__(self, vocab_size: int = 8000):
+        self.vocab_size = vocab_size
+        self.symbols = []
+        self.symbols_to_id = {}
+        self.merges = []
+        self.special_tokens = ["<pad>", "<unk>", "<bos>", "<eos>"]
 
     def _get_symbols(self, text: str) -> list[str]:
-        """Convert a word to list of symbols (characters with word boundary markers)."""
         symbols = list(text) + ["<w>"]
         return symbols
 
     def _get_pairs(self, words: list[list[str]]) -> Counter:
-        """Get count of adjacent symbol pairs across all words."""
         pairs = Counter()
         for word in words:
             for i in range(len(word) - 1):
@@ -111,12 +186,6 @@ class BytePairEncoder:
         return pairs
 
     def train(self, texts: list[str]):
-        """
-        Train BPE model on a list of texts.
-
-        Args:
-            texts: List of tokenized texts (each text is a space-separated string)
-        """
         word_freqs = Counter()
         all_words = []
 
@@ -128,18 +197,15 @@ class BytePairEncoder:
                     word_freqs[" ".join(symbols)] += 1
                     all_words.append(symbols)
 
-        # Number of merges to perform
-        num_merges = self.max_vocab_size - 256
+        num_merges = self.vocab_size - 256
         num_merges = min(num_merges, 5000)
 
-        # Initialize symbols from all unique characters + word boundaries
         all_chars = set()
         for word in all_words:
             all_chars.update(word)
         self.symbols = sorted(all_chars)
         self.symbols_to_id = {s: i for i, s in enumerate(self.symbols)}
 
-        # Iteratively merge most frequent pairs
         for merge_idx in range(num_merges):
             pairs = self._get_pairs(all_words)
 
@@ -153,13 +219,11 @@ class BytePairEncoder:
             if best_pair is None:
                 break
 
-            # Create new merged symbol
             new_symbol = "".join(best_pair)
             self.symbols.append(new_symbol)
             self.symbols_to_id[new_symbol] = len(self.symbols) - 1
             self.merges.append(best_pair)
 
-            # Apply this merge to all words
             new_all_words = []
             for word in all_words:
                 new_word = []
@@ -175,18 +239,9 @@ class BytePairEncoder:
             all_words = new_all_words
 
             if (merge_idx + 1) % 500 == 0:
-                print(f"  Trained {merge_idx + 1}/{num_merges} merges, vocab size: {len(self.symbols)}")
+                print(f"  Trained {merge_idx + 1}/{num_merges} merges")
 
     def encode(self, text: str) -> list[int]:
-        """
-        Encode a text string into token IDs.
-
-        Args:
-            text: Space-separated token string (e.g., "the cat <w>")
-
-        Returns:
-            List of token IDs
-        """
         tokens = text.split()
         result = []
 
@@ -210,9 +265,40 @@ class BytePairEncoder:
 
         return result
 
+    def decode(self, ids: list[int]) -> str:
+        tokens = []
+        for token_id in ids:
+            if token_id in self.symbols:
+                token_str = self.symbols[token_id]
+                if token_str not in ("<pad>", "<unk>", "<bos>", "<eos>", "<w>"):
+                    tokens.append(token_str.replace("<w>", ""))
+        return " ".join(tokens)
+
     @property
-    def vocab_size(self) -> int:
+    def vocab_len(self) -> int:
         return len(self.symbols)
+
+    def get_vocab_size(self) -> int:
+        return self.vocab_len
+
+    def save(self, path: str):
+        with open(path, "wb") as f:
+            pickle.dump({
+                "symbols": self.symbols,
+                "symbols_to_id": self.symbols_to_id,
+                "merges": self.merges,
+                "special_tokens": self.special_tokens,
+                "vocab_size": self.vocab_size,
+            }, f)
+
+    def load(self, path: str):
+        with open(path, "rb") as f:
+            state = pickle.load(f)
+        self.symbols = state["symbols"]
+        self.symbols_to_id = state["symbols_to_id"]
+        self.merges = state["merges"]
+        self.special_tokens = state["special_tokens"]
+        self.vocab_size = state["vocab_size"]
 
 
 # ============================================================================
@@ -220,7 +306,6 @@ class BytePairEncoder:
 # ============================================================================
 
 DEMO_TRAIN_DATA = [
-    # Greetings
     ("hello", "xin chào"),
     ("hi", "chào"),
     ("good morning", "chào buổi sáng"),
@@ -233,8 +318,6 @@ DEMO_TRAIN_DATA = [
     ("you are welcome", "không có gì"),
     ("goodbye", "tạm biệt"),
     ("see you", "hẹn gặp lại"),
-
-    # Identity / States
     ("i am home", "tôi ở nhà"),
     ("i am happy", "tôi vui"),
     ("i am sad", "tôi buồn"),
@@ -254,8 +337,6 @@ DEMO_TRAIN_DATA = [
     ("i am drinking", "tôi đang uống"),
     ("i am reading", "tôi đang đọc"),
     ("i am writing", "tôi đang viết"),
-
-    # Descriptions
     ("the cat is small", "con mèo nhỏ"),
     ("the dog is big", "con chó lớn"),
     ("the cat is big", "con mèo lớn"),
@@ -272,22 +353,6 @@ DEMO_TRAIN_DATA = [
     ("the car is slow", "xe hơi chậm"),
     ("the river is long", "con sông dài"),
     ("the mountain is high", "ngọn núi cao"),
-
-    # Locations
-    ("i am here", "tôi ở đây"),
-    ("i am there", "tôi ở đó"),
-    ("you are here", "bạn ở đây"),
-    ("you are there", "bạn ở đó"),
-    ("he is here", "anh ấy ở đây"),
-    ("she is there", "cô ấy ở đó"),
-    ("where is the bathroom", "nhà vệ sinh ở đâu"),
-    ("where is the hotel", "khách sạn ở đâu"),
-    ("where is the restaurant", "nhà hàng ở đâu"),
-    ("i need help", "tôi cần giúp đỡ"),
-    ("i need water", "tôi cần nước"),
-    ("i need food", "tôi cần đồ ăn"),
-
-    # Common phrases
     ("it is good", "nó tốt"),
     ("it is bad", "nó xấu"),
     ("it is hot", "trời nóng"),
@@ -308,8 +373,6 @@ DEMO_TRAIN_DATA = [
     ("very small", "rất nhỏ"),
     ("very happy", "rất vui"),
     ("very sad", "rất buồn"),
-
-    # Questions
     ("what is this", "đây là gì"),
     ("what is that", "đó là gì"),
     ("who are you", "bạn là ai"),
@@ -321,8 +384,6 @@ DEMO_TRAIN_DATA = [
     ("do you speak english", "bạn có nói tiếng anh không"),
     ("is it far", "có xa không"),
     ("is it near", "có gần không"),
-
-    # More complex
     ("the cat is here", "con mèo ở đây"),
     ("the dog is there", "con chó ở đó"),
     ("i want to go", "tôi muốn đi"),
@@ -363,46 +424,71 @@ def load_demo_data():
 
 def load_full_data():
     """
-    Load the full IWSLT Vietnamese-English dataset from HuggingFace.
+    Load the full IWSLT Vietnamese-English dataset from local files.
 
-    Uses the datasets library to download and cache the dataset.
-    First time: downloads ~500MB of data.
-    Subsequent runs: uses cached data.
+    Expected files in data/ directory:
+      - train.en (English training sentences)
+      - train.vi (Vietnamese training sentences)
+      - dev.en / dev.vi (validation, optional)
+      - tst2012.en / tst2012.vi (test, optional)
     """
-    from datasets import load_dataset
+    data_dir = Path("data")
 
-    print("  Downloading IWSLT Vietnamese-English dataset from HuggingFace...")
-    print("  Source: https://huggingface.co/datasets/IWSLT/mt_eng_vietnamese")
-    print("  This may take a few minutes on first run...")
+    train_en_path = data_dir / "train.en"
+    train_vi_path = data_dir / "train.vi"
+    dev_en_path = data_dir / "dev.en"
+    dev_vi_path = data_dir / "dev.vi"
+
+    # Check if extracted, if not extract from tgz
+    if not (train_en_path.exists() and train_vi_path.exists()):
+        import tarfile
+        print("  Extracting training data...")
+        tgz_path = data_dir / "train-en-vi.tgz"
+        if tgz_path.exists():
+            with tarfile.open(tgz_path, "r:gz") as tar:
+                tar.extractall(path=data_dir)
+            print("  Extracted train-en-vi.tgz")
+        else:
+            raise FileNotFoundError("Could not find training data")
+
+    # Read training pairs
+    print("  Reading training data...")
+    with open(train_en_path, "r", encoding="utf-8") as f:
+        en_train = [line.strip() for line in f if line.strip()]
+    with open(train_vi_path, "r", encoding="utf-8") as f:
+        vi_train = [line.strip() for line in f if line.strip()]
+
+    # Read validation pairs
+    print("  Reading development data...")
+    if dev_en_path.exists() and dev_vi_path.exists():
+        with open(dev_en_path, "r", encoding="utf-8") as f:
+            en_val = [line.strip() for line in f if line.strip()]
+        with open(dev_vi_path, "r", encoding="utf-8") as f:
+            vi_val = [line.strip() for line in f if line.strip()]
+        val_pairs = list(zip(en_val, vi_val))
+    else:
+        print("  No dev data found, using 1% of training data as validation")
+        split_idx = int(len(en_train) * 0.99)
+        en_val = en_train[split_idx:]
+        vi_val = vi_train[split_idx:]
+        val_pairs = list(zip(en_val, vi_val))
+        en_train = en_train[:split_idx]
+        vi_train = vi_train[:split_idx]
+
+    train_pairs = list(zip(en_train, vi_train))
+
+    print(f"  Train: {len(train_pairs):,} pairs")
+    print(f"  Validation: {len(val_pairs):,} pairs")
     print()
 
-    # Load the dataset
-    dataset = load_dataset("IWSLT/mt_eng_vietnamese")
-
-    # Get train, validation, and test splits
-    if "validation" in dataset:
-        val_data = dataset["validation"]
-    else:
-        # If no validation split, create one from train
-        split = dataset["train"].train_test_split(test_size=0.01, seed=42)
-        val_data = split["test"]
-        dataset["validation"] = val_data
-
-    if "test" in dataset:
-        test_data = dataset["test"]
-    else:
-        test_data = val_data  # Use validation as test if not available
-
-    train_data = dataset["train"]
-
-    print(f"  Train: {len(train_data)} pairs")
-    print(f"  Validation: {len(val_data)} pairs")
-    print(f"  Test: {len(test_data)} pairs")
-    print()
-
-    # Convert to list of (english, vietnamese) tuples
-    train_pairs = [(row["english"], row["vietnamese"]) for row in train_data]
-    val_pairs = [(row["english"], row["vietnamese"]) for row in val_data]
+    # Show sample
+    print("  Sample training pairs:")
+    for i in range(min(3, len(train_pairs))):
+        en_preview = train_pairs[i][0][:70]
+        vi_preview = train_pairs[i][1][:70]
+        print(f"    EN: {en_preview}")
+        print(f"    VI: {vi_preview}")
+        print()
 
     return train_pairs, val_pairs
 
@@ -415,31 +501,30 @@ class TranslationDataset(Dataset):
     """Dataset for Vietnamese-English translation."""
 
     def __init__(self, en_texts: list[str], vi_texts: list[str],
-                 en_vocab: BytePairEncoder, vi_vocab: BytePairEncoder,
-                 max_len: int = 30):
+                 en_vocab, vi_vocab, max_len: int = 50):
         self.en_vocab = en_vocab
         self.vi_vocab = vi_vocab
         self.max_len = max_len
 
-        # Encode all sentences
         self.en_encoded = []
         self.vi_encoded = []
+
+        # Get special token IDs
+        self.bos_id = 2  # <bos>
+        self.eos_id = 3  # <eos>
+        self.pad_id = 0  # <pad>
 
         for en_text, vi_text in zip(en_texts, vi_texts):
             en_ids = en_vocab.encode(en_text)
             vi_ids = vi_vocab.encode(vi_text)
 
             # Add BOS and EOS
-            bos_idx = en_vocab.symbols_to_id.get("<bos>", 0)
-            eos_idx = en_vocab.symbols_to_id.get("<eos>", 1)
-
-            en_ids = [bos_idx] + en_ids[:max_len - 2] + [eos_idx]
-            vi_ids = [bos_idx] + vi_ids[:max_len - 2] + [eos_idx]
+            en_ids = [self.bos_id] + en_ids[:max_len - 2] + [self.eos_id]
+            vi_ids = [self.bos_id] + vi_ids[:max_len - 2] + [self.eos_id]
 
             # Pad to max_len
-            pad_idx = en_vocab.symbols_to_id.get("<pad>", 0)
-            en_ids = en_ids[:max_len] + [pad_idx] * (max_len - len(en_ids))
-            vi_ids = vi_ids[:max_len] + [pad_idx] * (max_len - len(vi_ids))
+            en_ids = en_ids[:max_len] + [self.pad_id] * max(0, max_len - len(en_ids))
+            vi_ids = vi_ids[:max_len] + [self.pad_id] * max(0, max_len - len(vi_ids))
 
             self.en_encoded.append(en_ids)
             self.vi_encoded.append(vi_ids)
@@ -455,7 +540,7 @@ class TranslationDataset(Dataset):
 
 
 # ============================================================================
-# TRANSFORMER MODEL (same as lessons 6/7)
+# TRANSFORMER MODEL
 # ============================================================================
 
 class TokenEmbedding(nn.Module):
@@ -589,8 +674,8 @@ class EncoderLayer(nn.Module):
         self.norm2 = LayerNorm((d_model,))
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x):
-        attn_out, _ = self.self_attention(x, x, x)
+    def forward(self, x, src_padding_mask=None):
+        attn_out, _ = self.self_attention(x, x, x, src_padding_mask)
         x = self.norm1(x + self.dropout(attn_out))
         x = self.norm2(x + self.dropout(self.feed_forward(x)))
         return x
@@ -617,8 +702,8 @@ class DecoderLayer(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, src_vocab_size, tgt_vocab_size, d_model=64, n_heads=4,
-                 n_encoder_layers=2, n_decoder_layers=2, d_ff=128, dropout=0.1):
+    def __init__(self, src_vocab_size, tgt_vocab_size, d_model=128, n_heads=8,
+                 n_encoder_layers=3, n_decoder_layers=3, d_ff=256, dropout=0.1):
         super().__init__()
         self.d_model = d_model
         self.src_pad_idx = 0
@@ -634,26 +719,31 @@ class Transformer(nn.Module):
     def create_masks(self, src, tgt):
         batch_size, src_seq_len = src.shape
         tgt_seq_len = tgt.shape[1]
-        src_padding_mask = (src == self.src_pad_idx).unsqueeze(1).unsqueeze(2)
+        # Convention: 1 = attend-to, 0 = mask-out (matches the causal mask).
+        src_padding_mask = (src != self.src_pad_idx).unsqueeze(1).unsqueeze(2)
         tgt_causal_mask = torch.tril(torch.ones(tgt_seq_len, tgt_seq_len)).to(src.device)
-        tgt_padding_mask = (tgt == self.tgt_pad_idx).unsqueeze(1).unsqueeze(2)
+        tgt_padding_mask = (tgt != self.tgt_pad_idx).unsqueeze(1).unsqueeze(2)
         return src_padding_mask, tgt_causal_mask, tgt_padding_mask
 
-    def encode(self, src):
+    def encode(self, src, src_padding_mask=None):
         x = self.src_pos_encoding(self.src_embedding(src))
         for layer in self.encoder:
-            x = layer(x)
+            x = layer(x, src_padding_mask)
         return x
 
     def decode(self, tgt, encoder_output, src_padding_mask, tgt_causal_mask, tgt_padding_mask):
         x = self.tgt_pos_encoding(self.tgt_embedding(tgt))
+        # Combine causal + target padding so decoder self-attn also ignores pad positions.
+        self_attn_mask = tgt_causal_mask
+        if tgt_padding_mask is not None:
+            self_attn_mask = tgt_causal_mask.bool() & tgt_padding_mask.bool()
         for layer in self.decoder:
-            x = layer(x, encoder_output, tgt_causal_mask, src_padding_mask)
+            x = layer(x, encoder_output, self_attn_mask, src_padding_mask)
         return x
 
     def forward(self, src, tgt):
         src_pad, tgt_causal, tgt_pad = self.create_masks(src, tgt)
-        encoder_output = self.encode(src)
+        encoder_output = self.encode(src, src_pad)
         decoder_output = self.decode(tgt, encoder_output, src_pad, tgt_causal, tgt_pad)
         return self.output_linear(decoder_output)
 
@@ -662,44 +752,42 @@ class Transformer(nn.Module):
 # TRAINING FUNCTIONS
 # ============================================================================
 
-def get_lr_scheduler(optimizer, num_warmup_steps: int, current_step: int, total_steps: int):
-    """
-    Learning rate scheduler with warmup + cosine decay.
+def get_lr_scheduler(base_lr: float, num_warmup_steps: int, current_step: int, total_steps: int):
+    """Learning rate scheduler with warmup + cosine decay.
 
-    WHY WARMUP?
-    ───────────
-    At the start of training, model weights are random.
-    Large gradients + random weights = unstable training.
-    Warmup gradually increases the learning rate so the model
-    doesn't get shocked by large updates.
-
-    WHY COSINE DECAY?
-    ─────────────────
-    After warmup, we slowly decrease the LR following a cosine curve.
-    This allows fine-tuning in later stages without jumping around.
+    Takes a fixed base_lr so the schedule is applied relative to it, not to the
+    already-decayed value in the optimizer (which would compound each step).
     """
+    if num_warmup_steps <= 0:
+        progress = current_step / max(1, total_steps)
+        return base_lr * 0.5 * (1 + math.cos(math.pi * progress))
+
     if current_step < num_warmup_steps:
-        return optimizer.param_groups[0]["lr"] * (current_step / num_warmup_steps)
+        # Start from a small nonzero LR so step 0 still moves weights.
+        return base_lr * ((current_step + 1) / num_warmup_steps)
     else:
         progress = (current_step - num_warmup_steps) / max(1, total_steps - num_warmup_steps)
-        return optimizer.param_groups[0]["lr"] * 0.5 * (1 + math.cos(math.pi * progress))
+        return base_lr * 0.5 * (1 + math.cos(math.pi * progress))
 
 
 def train_epoch(model, dataloader, optimizer, criterion, device, current_step: int,
-                total_steps: int, warmup_steps: int):
+                total_steps: int, warmup_steps: int, base_lr: float,
+                epoch: int, total_epochs: int):
     """Train for one epoch with learning rate scheduling."""
     model.train()
     total_loss = 0
     correct_tokens = 0
     total_tokens = 0
 
-    for src_batch, tgt_batch in dataloader:
+    # Progress bar for training
+    pbar = tqdm(dataloader, desc=f"Epoch {epoch}/{total_epochs} [Train]", leave=False)
+
+    for src_batch, tgt_batch in pbar:
         src_batch = src_batch.to(device)
         tgt_batch = tgt_batch.to(device)
 
         optimizer.zero_grad()
 
-        # Teacher forcing: feed correct previous tokens as decoder input
         src_input = src_batch
         tgt_input = tgt_batch[:, :-1]
         tgt_target = tgt_batch[:, 1:]
@@ -713,8 +801,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device, current_step: i
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-        # Update learning rate
-        new_lr = get_lr_scheduler(optimizer, warmup_steps, current_step, total_steps)
+        new_lr = get_lr_scheduler(base_lr, warmup_steps, current_step, total_steps)
         for param_group in optimizer.param_groups:
             param_group["lr"] = new_lr
 
@@ -727,21 +814,34 @@ def train_epoch(model, dataloader, optimizer, criterion, device, current_step: i
 
         current_step += 1
 
+        # Update progress bar
+        running_loss = total_loss / (pbar.n + 1)
+        running_acc = correct_tokens / total_tokens
+        pbar.set_postfix({
+            "loss": f"{running_loss:.4f}",
+            "acc": f"{running_acc:.4f}",
+            "lr": f"{new_lr:.2e}"
+        })
+
     avg_loss = total_loss / len(dataloader)
     accuracy = correct_tokens / total_tokens
 
     return avg_loss, accuracy, current_step
 
 
-def evaluate(model, dataloader, criterion, device):
+def evaluate(model, dataloader, criterion, device, epoch: int = None, total_epochs: int = None):
     """Evaluate the model."""
     model.eval()
     total_loss = 0
     correct_tokens = 0
     total_tokens = 0
 
+    # Progress bar for validation
+    desc = f"Epoch {epoch}/{total_epochs} [Val]" if epoch else "Validation"
+    pbar = tqdm(dataloader, desc=desc, leave=False)
+
     with torch.no_grad():
-        for src_batch, tgt_batch in dataloader:
+        for src_batch, tgt_batch in pbar:
             src_batch = src_batch.to(device)
             tgt_batch = tgt_batch.to(device)
 
@@ -760,65 +860,49 @@ def evaluate(model, dataloader, criterion, device):
             correct_tokens += (preds == target_flat).sum().item()
             total_tokens += target_flat.numel()
 
+            # Update progress bar
+            running_loss = total_loss / (pbar.n + 1)
+            running_acc = correct_tokens / total_tokens
+            pbar.set_postfix({
+                "loss": f"{running_loss:.4f}",
+                "acc": f"{running_acc:.4f}"
+            })
+
     avg_loss = total_loss / len(dataloader)
     accuracy = correct_tokens / total_tokens
 
     return avg_loss, accuracy
 
 
-def generate_translation(model, src_text, src_vocab, tgt_vocab, max_len: int = 30, device="cpu"):
+def generate_translation(model, src_text, en_vocab, vi_vocab, max_len: int = 50, device="cpu"):
     """Generate a translation using greedy decoding."""
     model.eval()
 
-    # Encode source using BPE
-    en_tokens = src_text.lower().split()
-    bos_idx = src_vocab.symbols_to_id.get("<bos>", 0)
-    eos_idx = src_vocab.symbols_to_id.get("<eos>", 1)
-    pad_idx = src_vocab.symbols_to_id.get("<pad>", 0)
+    bos_id = 2
+    eos_id = 3
+    pad_id = 0
 
-    # Build BPE input text the same way training data was formatted:
-    # Training data: "hello" → encode("hello") → splits by space → ["hello"] → BPE
-    # For multi-word: "i am happy" → each word gets <w> marker
-    bpe_parts = []
-    for token in en_tokens:
-        chars = " ".join(list(token))
-        bpe_parts.append(chars + " <w>")
-    bpe_input = " ".join(bpe_parts)
-
-    encoded = src_vocab.encode(bpe_input)
-
-    # Fallback: if BPE produces nothing useful, use simple char encoding
-    if len(encoded) < 2:
-        # Fallback to simple character-level encoding
-        encoded = []
-        for token in en_tokens:
-            for ch in token:
-                ch_with_boundary = ch + " <w>"
-                if ch_with_boundary in src_vocab.symbols_to_id:
-                    encoded.append(src_vocab.symbols_to_id[ch_with_boundary])
-                else:
-                    encoded.append(src_vocab.symbols_to_id.get(ch, 1))
-        encoded = [0] + encoded + [1]  # bos + chars + eos
-
-    encoded = [bos_idx] + encoded[:max_len - 2] + [eos_idx]
+    # Encode source
+    encoded = en_vocab.encode(src_text.lower())
+    encoded = [bos_id] + encoded[:max_len - 2] + [eos_id]
     encoded = encoded[:max_len]
-    encoded += [pad_idx] * (max_len - len(encoded))
+    encoded += [pad_id] * (max_len - len(encoded))
 
     src_tensor = torch.tensor([encoded], dtype=torch.long).to(device)
 
     # Start with <BOS>
-    tgt_ids = [bos_idx]
+    tgt_ids = [bos_id]
     tgt_tensor = torch.tensor([tgt_ids], dtype=torch.long).to(device)
 
     generated_tokens = []
 
     with torch.no_grad():
-        encoder_output = model.encode(src_tensor)
+        src_padding_mask = (src_tensor != pad_id).unsqueeze(1).unsqueeze(2).to(device)
+        encoder_output = model.encode(src_tensor, src_padding_mask)
 
         for _ in range(max_len - 1):
             tgt_seq_len = len(tgt_ids)
             causal_mask = torch.tril(torch.ones(tgt_seq_len, tgt_seq_len)).to(device)
-            src_padding_mask = (src_tensor == pad_idx).unsqueeze(1).unsqueeze(2).to(device)
 
             decoder_output = model.decode(tgt_tensor, encoder_output, src_padding_mask, causal_mask, None)
 
@@ -827,7 +911,7 @@ def generate_translation(model, src_text, src_vocab, tgt_vocab, max_len: int = 3
 
             next_token = probs.argmax(dim=-1).item()
 
-            if next_token == eos_idx:
+            if next_token == eos_id:
                 break
 
             tgt_ids.append(next_token)
@@ -836,27 +920,101 @@ def generate_translation(model, src_text, src_vocab, tgt_vocab, max_len: int = 3
             tgt_tensor = torch.tensor([tgt_ids], dtype=torch.long).to(device)
 
     # Decode to text
-    decoded = []
-    for token_id in generated_tokens:
-        if token_id in tgt_vocab.symbols_to_id:
-            token_str = tgt_vocab.symbols_to_id[token_id]
-            if token_str not in ("<bos>", "<eos>", "<w>", "<pad>", "<unk>"):
-                decoded.append(token_str)
-
-    result = " ".join(decoded).replace(" <w>", "")
-    return result
+    decoded = vi_vocab.decode(generated_tokens)
+    return decoded
 
 
 # ============================================================================
-# MAIN TRAINING LOOP
+# INFERENCE
+# ============================================================================
+
+def pick_device():
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+def infer_loop():
+    """Load checkpoint + tokenizers and drop into an interactive EN→VI prompt."""
+    if not os.path.exists(CHECKPOINT_PATH):
+        print(f"No checkpoint at {CHECKPOINT_PATH}. Train first with --demo or --full.")
+        return
+
+    en_path, vi_path = tokenizer_paths()
+    if not (os.path.exists(en_path) and os.path.exists(vi_path)):
+        print(f"Missing tokenizer files ({en_path}, {vi_path}). Train first.")
+        return
+
+    device = pick_device()
+    print(f"Using device: {device}")
+
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device, weights_only=False)
+    tokenizer_type = checkpoint["tokenizer_type"]
+    cfg = checkpoint["model_config"]
+
+    if tokenizer_type == "huggingface":
+        if not HAS_TOKENIZERS:
+            print("Checkpoint used HuggingFace tokenizers but that library isn't installed.")
+            return
+        en_vocab = HuggingFaceBPE()
+        vi_vocab = HuggingFaceBPE()
+    else:
+        en_vocab = SimpleBPE()
+        vi_vocab = SimpleBPE()
+    en_vocab.load(en_path)
+    vi_vocab.load(vi_path)
+
+    model = Transformer(
+        src_vocab_size=cfg["src_vocab_size"],
+        tgt_vocab_size=cfg["tgt_vocab_size"],
+        d_model=cfg["d_model"],
+        n_heads=cfg["n_heads"],
+        n_encoder_layers=cfg["n_encoder_layers"],
+        n_decoder_layers=cfg["n_decoder_layers"],
+        d_ff=cfg["d_ff"],
+        dropout=cfg["dropout"],
+    ).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+
+    max_len = cfg.get("max_seq_len", 50)
+
+    print()
+    print("Interactive translation. Type English, get Vietnamese.")
+    print("Blank line or Ctrl-D to exit.")
+    print()
+    while True:
+        try:
+            text = input("EN> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not text:
+            break
+        vi_pred = generate_translation(model, text, en_vocab, vi_vocab, max_len=max_len, device=device)
+        print(f"VI> {vi_pred}\n")
+
+
+# ============================================================================
+# MAIN
 # ============================================================================
 
 def main():
     parser = argparse.ArgumentParser(description="Train Transformer on Vietnamese-English translation")
-    parser.add_argument("--demo", action="store_true", help="Use small demo dataset for quick testing")
-    parser.add_argument("--full", action="store_true", help="Use full IWSLT dataset (requires GPU)")
-    parser.add_argument("--epochs", type=int, default=200, help="Number of training epochs (demo mode)")
-    parser.add_argument("--num-bpe-merges", type=int, default=5000, help="Number of BPE merges to train")
+    parser.add_argument("--demo", action="store_true", help="Use small demo dataset")
+    parser.add_argument("--full", action="store_true", help="Use full IWSLT dataset")
+    parser.add_argument("--infer", action="store_true",
+                        help="Skip training; load saved model + tokenizers for interactive translation")
+    parser.add_argument("--epochs", type=int, default=30, help="Number of epochs")
+    parser.add_argument("--batch-size", type=int, default=32, help="Batch size")
+    parser.add_argument("--vocab-size", type=int, default=8000, help="Vocabulary size")
+    parser.add_argument("--d-model", type=int, default=128, help="Model dimension")
+    parser.add_argument("--n-heads", type=int, default=8, help="Number of attention heads")
+    parser.add_argument("--n-layers", type=int, default=3, help="Number of encoder/decoder layers")
+    parser.add_argument("--d-ff", type=int, default=256, help="Feed-forward dimension")
+    parser.add_argument("--max-len", type=int, default=50, help="Max sequence length")
     args = parser.parse_args()
 
     print()
@@ -866,23 +1024,33 @@ def main():
     print("╚" + "═" * 68 + "╝")
     print()
 
+    if args.infer:
+        infer_loop()
+        return
+
     # Configuration
-    BATCH_SIZE = 32
-    D_MODEL = 128
-    N_HEADS = 8
-    N_ENCODER_LAYERS = 3
-    N_DECODER_LAYERS = 3
-    D_FF = 256
+    BATCH_SIZE = args.batch_size
+    D_MODEL = args.d_model
+    N_HEADS = args.n_heads
+    N_ENCODER_LAYERS = args.n_layers
+    N_DECODER_LAYERS = args.n_layers
+    D_FF = args.d_ff
     DROPOUT = 0.1
-    NUM_EPOCHS = args.epochs if args.demo else 30
-    WARMUP_STEPS = 10 if args.demo else 4000
-    MAX_SEQ_LEN = 30
-    VOCAB_SIZE = 4000
+    NUM_EPOCHS = args.epochs
+    MAX_SEQ_LEN = args.max_len
+    VOCAB_SIZE = args.vocab_size
     LEARNING_RATE = 0.001
 
-    # Device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    # Device - prefer MPS (Apple Silicon GPU) if available
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+        print(f"Using device: {device} (Apple Silicon GPU)")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+        print(f"Using device: {device}")
+    else:
+        device = torch.device("cpu")
+        print(f"Using device: {device} (CPU only)")
     print()
 
     # ================================================================
@@ -895,75 +1063,69 @@ def main():
     else:
         train_pairs, val_pairs = load_full_data()
 
+    # Calculate warmup steps based on dataset size
+    # For demo: use 0 warmup steps (start learning immediately with cosine decay)
+    # For full: ~4166 steps/epoch (133K/32), so use 4000 steps
+    WARMUP_STEPS = 0 if args.demo else 4000
+
     en_texts_train = [p[0] for p in train_pairs]
     vi_texts_train = [p[1] for p in train_pairs]
     en_texts_val = [p[0] for p in val_pairs]
     vi_texts_val = [p[1] for p in val_pairs]
 
-    print(f"  English sentences: {len(en_texts_train)}")
-    print(f"  Vietnamese sentences: {len(vi_texts_train)}")
+    print(f"  English sentences: {len(en_texts_train):,}")
+    print(f"  Vietnamese sentences: {len(vi_texts_train):,}")
     print()
 
     # ================================================================
-    # BPE TOKENIZER
+    # TOKENIZER
     # ================================================================
-    print("Step 2: Training BPE tokenizer...")
-    print()
-    print("  WHAT IS BPE AND WHY DOES IT WORK?")
-    print("  ───────────────────────────────────")
-    print("  BPE starts with characters and learns common merges.")
-    print()
-    print("  Example with 'low', 'lower', 'newest', 'unhappiness':")
-    print()
-    print("  Step 1 (characters):")
-    print("    'low'     → l, o, w, <w>")
-    print("    'lower'   → l, o, w, e, r, <w>")
-    print("    'newest'  → n, e, w, e, s, t, <w>")
-    print("    'unhappy' → u, n, h, a, p, p, y, <w>")
-    print()
-    print("  Step 2 (count pairs):")
-    print("    ('o', 'w') appears in 2 words → most frequent")
-    print("    ('e', 'w') appears in 1 word")
-    print("    ('p', 'p') appears in 1 word")
-    print()
-    print("  Step 3 (merge most frequent):")
-    print("    Merge ('o', 'w') → new symbol 'ow'")
-    print("    'low'     → l, ow, <w>")
-    print("    'lower'   → l, ow, e, r, <w>")
-    print()
-    print("  Step 4 (repeat):")
-    print("    Next: ('l', 'ow') → 'low'")
-    print("    'low'     → low, <w>")
-    print("    'lower'   → low, e, r, <w>")
-    print()
-    print("  RESULT: 'low' becomes a single token!")
-    print("  This is why BPE works: it learns the language structure.")
+    print("Step 2: Training tokenizers...")
     print()
 
-    print("  Training English BPE...")
-    en_bpe = BytePairEncoder(max_vocab_size=VOCAB_SIZE)
-    en_bpe.train(en_texts_train)
-    print(f"  English vocab size: {en_bpe.vocab_size}")
+    if HAS_TOKENIZERS:
+        print("  Using HuggingFace tokenizers library")
+        en_vocab = HuggingFaceBPE(vocab_size=VOCAB_SIZE)
+        vi_vocab = HuggingFaceBPE(vocab_size=VOCAB_SIZE)
 
-    print("\n  Training Vietnamese BPE...")
-    vi_bpe = BytePairEncoder(max_vocab_size=VOCAB_SIZE)
-    vi_bpe.train(vi_texts_train)
-    print(f"  Vietnamese vocab size: {vi_bpe.vocab_size}")
-    print()
+        # Write texts to temp files for training
+        temp_en_path = "/tmp/train.en.txt"
+        temp_vi_path = "/tmp/train.vi.txt"
 
-    # Show some BPE merges
-    print("  Sample BPE merges (first 15):")
-    for i, (p1, p2) in enumerate(en_bpe.merges[:15]):
-        print(f"    {i+1:2d}. '{p1}' + '{p2}' → '{p1}{p2}'")
-    print()
+        with open(temp_en_path, "w", encoding="utf-8") as f:
+            for text in en_texts_train:
+                f.write(text + "\n")
+        with open(temp_vi_path, "w", encoding="utf-8") as f:
+            for text in vi_texts_train:
+                f.write(text + "\n")
 
-    # Show some tokenizations
-    print("  Sample English tokenizations:")
-    sample_sentences = ["the cat <w>", "hello <w>", "i am happy <w>"]
-    for sent in sample_sentences:
-        ids = en_bpe.encode(sent)
-        tokens = [en_bpe.symbols[s] for s in ids if s in en_bpe.symbols]
-        print(f"    '{sent}' → {tokens} → IDs: {ids}")
+        print("  Training English tokenizer...")
+        en_vocab.train([temp_en_path])
+
+        print("\n  Training Vietnamese tokenizer...")
+        vi_vocab.train([temp_vi_path])
+
+        # Clean up
+        os.remove(temp_en_path)
+        os.remove(temp_vi_path)
+    else:
+        print("  Using simple BPE implementation (install 'tokenizers' for better results)")
+        print("  Training English tokenizer...")
+        en_vocab = SimpleBPE(vocab_size=VOCAB_SIZE)
+        en_vocab.train(en_texts_train)
+        print(f"  English vocab size: {en_vocab.get_vocab_size()}")
+
+        print("\n  Training Vietnamese tokenizer...")
+        vi_vocab = SimpleBPE(vocab_size=VOCAB_SIZE)
+        vi_vocab.train(vi_texts_train)
+        print(f"  Vietnamese vocab size: {vi_vocab.get_vocab_size()}")
+
+    # Persist tokenizers so --infer can reload them without retraining.
+    en_tokenizer_path, vi_tokenizer_path = tokenizer_paths()
+    en_vocab.save(en_tokenizer_path)
+    vi_vocab.save(vi_tokenizer_path)
+    print(f"  Saved tokenizers: {en_tokenizer_path}, {vi_tokenizer_path}")
+
     print()
 
     # ================================================================
@@ -972,18 +1134,18 @@ def main():
     print("Step 3: Creating datasets...")
     train_dataset = TranslationDataset(
         en_texts_train, vi_texts_train,
-        en_bpe, vi_bpe, max_len=MAX_SEQ_LEN
+        en_vocab, vi_vocab, max_len=MAX_SEQ_LEN
     )
     val_dataset = TranslationDataset(
         en_texts_val, vi_texts_val,
-        en_bpe, vi_bpe, max_len=MAX_SEQ_LEN
+        en_vocab, vi_vocab, max_len=MAX_SEQ_LEN
     )
-    print(f"  Training samples: {len(train_dataset)}")
-    print(f"  Validation samples: {len(val_dataset)}")
+    print(f"  Training samples: {len(train_dataset):,}")
+    print(f"  Validation samples: {len(val_dataset):,}")
     print()
 
     # Data loaders
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
     print()
 
@@ -992,8 +1154,8 @@ def main():
     # ================================================================
     print("Step 4: Creating model...")
     model = Transformer(
-        src_vocab_size=en_bpe.vocab_size,
-        tgt_vocab_size=vi_bpe.vocab_size,
+        src_vocab_size=en_vocab.get_vocab_size(),
+        tgt_vocab_size=vi_vocab.get_vocab_size(),
         d_model=D_MODEL,
         n_heads=N_HEADS,
         n_encoder_layers=N_ENCODER_LAYERS,
@@ -1020,42 +1182,60 @@ def main():
     print("STARTING TRAINING")
     print("=" * 70)
     print(f"  Epochs: {NUM_EPOCHS}")
-    print(f"  Steps per epoch: {steps_per_epoch}")
+    print(f"  Steps per epoch: {steps_per_epoch:,}")
     print(f"  Total steps: {total_steps:,}")
     print(f"  Warmup steps: {WARMUP_STEPS}")
     print(f"  Learning rate: {LEARNING_RATE}")
+    print(f"  Batch size: {BATCH_SIZE}")
+    print(f"  Max sequence length: {MAX_SEQ_LEN}")
     print()
 
     current_step = 0
     best_val_loss = float("inf")
 
     for epoch in range(1, NUM_EPOCHS + 1):
+        print(f"\n{'='*70}")
+        print(f"EPOCH {epoch}/{NUM_EPOCHS}")
+        print(f"{'='*70}")
+
         train_loss, train_acc, current_step = train_epoch(
             model, train_loader, optimizer, criterion, device,
-            current_step, total_steps, WARMUP_STEPS
+            current_step, total_steps, WARMUP_STEPS, LEARNING_RATE,
+            epoch, NUM_EPOCHS
         )
 
-        val_loss, val_acc = evaluate(model, val_loader, criterion, device)
+        val_loss, val_acc = evaluate(model, val_loader, criterion, device, epoch, NUM_EPOCHS)
 
         current_lr = optimizer.param_groups[0]["lr"]
         perplexity = math.exp(min(train_loss, 100))
 
-        if epoch % 10 == 0 or epoch == 1:
-            print(f"Epoch {epoch:3d}/{NUM_EPOCHS} | "
-                  f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
-                  f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | "
-                  f"Perplexity: {perplexity:.2f} | LR: {current_lr:.8f}")
+        print(f"\n{'='*70}")
+        print(f"EPOCH {epoch}/{NUM_EPOCHS} SUMMARY")
+        print(f"{'='*70}")
+        print(f"  Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
+        print(f"  Val Loss:   {val_loss:.4f} | Val Acc:   {val_acc:.4f}")
+        print(f"  Perplexity: {perplexity:.2f}")
+        print(f"  Learning Rate: {current_lr:.8f}")
+        print()
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save({
                 "model_state_dict": model.state_dict(),
-                "en_bpe_symbols": en_bpe.symbols,
-                "en_bpe_merges": en_bpe.merges,
-                "vi_bpe_symbols": vi_bpe.symbols,
-                "vi_bpe_merges": vi_bpe.merges,
+                "tokenizer_type": "huggingface" if HAS_TOKENIZERS else "simple",
+                "model_config": {
+                    "src_vocab_size": en_vocab.get_vocab_size(),
+                    "tgt_vocab_size": vi_vocab.get_vocab_size(),
+                    "d_model": D_MODEL,
+                    "n_heads": N_HEADS,
+                    "n_encoder_layers": N_ENCODER_LAYERS,
+                    "n_decoder_layers": N_DECODER_LAYERS,
+                    "d_ff": D_FF,
+                    "dropout": DROPOUT,
+                    "max_seq_len": MAX_SEQ_LEN,
+                },
                 "epoch": epoch,
-            }, "best_iwslt_transformer.pth")
+            }, CHECKPOINT_PATH)
             print(f"  ✓ Saved best model (val loss: {val_loss:.4f})")
 
     print()
@@ -1065,7 +1245,7 @@ def main():
     print()
 
     # Load best model
-    checkpoint = torch.load("best_iwslt_transformer.pth", weights_only=True)
+    checkpoint = torch.load(CHECKPOINT_PATH, weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
 
     # Test translations
@@ -1074,52 +1254,28 @@ def main():
     print()
 
     test_sentences = [
+        "hello",
         "i am happy",
         "the cat is small",
-        "hello",
-        "i am home",
         "good morning",
-        "i am tired",
-        "it is cold",
-        "the dog is big",
-        "i love you",
         "thank you",
     ]
 
     for eng in test_sentences:
-        vi_pred = generate_translation(model, eng, en_bpe, vi_bpe, device=device)
-        # Find expected
-        expected = None
-        all_pairs = train_pairs + val_pairs
-        for src, tgt in all_pairs:
-            if src == eng:
-                expected = tgt
-                break
-
+        vi_pred = generate_translation(model, eng, en_vocab, vi_vocab, device=device)
         print(f"  English:    '{eng}'")
         print(f"  Predicted:  '{vi_pred}'")
-        if expected:
-            print(f"  Expected:   '{expected}'")
         print()
 
     print("=" * 70)
     print("WHAT WE LEARNED:")
     print("-" * 70)
-    print("✓ BPE Tokenization: Subword tokenization for handling rare words")
-    print("✓ HuggingFace Datasets: Easy access to real translation datasets")
-    print("✓ Learning Rate Schedule: Warmup + cosine decay for stable training")
+    print("✓ HuggingFace Tokenizers: Production-quality BPE tokenization")
+    print("✓ Real Dataset: IWSLT Vietnamese-English corpus (~133K pairs)")
+    print("✓ Learning Rate Schedule: Warmup + cosine decay")
     print("✓ Teacher Forcing: Feed correct tokens during training")
-    print("✓ Greedy Decoding: Pick highest probability token during inference")
+    print("✓ Greedy Decoding: Pick highest probability token")
     print("✓ Gradient Clipping: Prevent exploding gradients")
-    print()
-    print("=" * 70)
-    print("NEXT STEPS:")
-    print("-" * 70)
-    print("1. Try --full flag for the complete IWSLT dataset (~130K pairs)")
-    print("2. Increase model size: --d-model 256 --n-heads 8")
-    print("3. Train for more epochs (50-100) with a GPU")
-    print("4. Try beam search decoding for better translations")
-    print("5. Implement BLEU score evaluation")
     print("=" * 70)
     print()
 
