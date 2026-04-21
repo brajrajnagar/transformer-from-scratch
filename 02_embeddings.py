@@ -163,6 +163,57 @@ def demonstrate_token_embedding():
     print("=" * 70)
     print()
 
+    # ================================================================
+    # STEP 0: REAL TEXT -> TOKEN IDS (The tokenization process)
+    # ================================================================
+    print("STEP 0: How Raw Text Becomes Token IDs")
+    print("-" * 70)
+    print()
+
+    # Create a simple vocabulary (in practice, you'd use a real tokenizer)
+    vocab = {
+        "<PAD>": 0, "<UNK>": 1, "<BOS>": 2, "<EOS>": 3,
+        "the": 4, "a": 5, "cat": 6, "dog": 7, "sat": 8, "ran": 9,
+        "on": 10, "mat": 11, "in": 12, "house": 13, "big": 14,
+        "brown": 15, "jumped": 16, "over": 17, "lazy": 18,
+        "and": 19, "played": 20, "happy": 21,
+    }
+
+    print("VOCABULARY (word -> ID):")
+    for word, idx in sorted(vocab.items(), key=lambda x: x[1]):
+        print(f"    {word:12s} -> {idx}")
+    print()
+
+    # Tokenize sentences
+    sentences = [
+        "the cat sat",
+        "the dog ran",
+    ]
+
+    def tokenize(sentence, vocab):
+        """Convert a sentence to token IDs."""
+        tokens = sentence.lower().split()
+        token_ids = [vocab.get(t, vocab["<UNK>"]) for t in tokens]
+        return token_ids, tokens
+
+    print("Original sentences:")
+    for s in sentences:
+        print(f"    '{s}'")
+    print()
+
+    print("After tokenization:")
+    for sentence in sentences:
+        ids, tokens = tokenize(sentence, vocab)
+        print(f"    '{sentence}'")
+        print(f"      Words: {tokens}")
+        print(f"      IDs:   {ids}")
+        mapping = [f"'{w}'->{vocab[w]}" for w in tokens]
+        print(f"      Map:   {' '.join(mapping)}")
+        print()
+
+    # ================================================================
+    # STEP 1: TOKEN EMBEDDING (the actual embedding demo)
+    # ================================================================
     vocab_size = 100
     d_model = 16
     batch_size = 2
@@ -171,19 +222,20 @@ def demonstrate_token_embedding():
     # Create embedding layer
     token_emb = TokenEmbedding(vocab_size, d_model)
 
-    # Simulate a batch of token IDs (like after tokenization)
-    # Each number is a word index in the vocabulary
+    # Use the real token IDs from above
     token_ids = torch.tensor([
-        [3, 15, 42, 7, 99],    # Sentence 1: 5 words
-        [10, 20, 30, 40, 50],  # Sentence 2: 5 words
+        [4, 6, 8, 1, 1],    # "the cat sat <UNK> <UNK>"
+        [4, 7, 9, 1, 1],    # "the dog ran <UNK> <UNK>"
     ])
 
-    print(f"Input: Token IDs")
+    print(f"STEP 1: Token Embedding (Look-up Table)")
+    print(f"  Input: Token IDs")
     print(f"  Shape: {token_ids.shape}")
     print(f"  Values:\n{token_ids}")
     print()
     print(f"  Interpretation: Each number is a word index.")
-    print(f"  E.g., token 3 = 'the', token 15 = 'cat', etc.")
+    print(f"    4 = 'the', 6 = 'cat', 8 = 'sat'")
+    print(f"    4 = 'the', 7 = 'dog', 9 = 'ran'")
     print()
 
     # Look up embeddings
