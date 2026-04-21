@@ -172,6 +172,26 @@ class PositionalEncoding(nn.Module):
 
         Returns:
             Position-aware embeddings, shape (batch_size, seq_len, d_model)
+
+        WHAT DOES DROPOUT DO?
+        ────────────────────
+        Dropout randomly sets elements of the tensor to ZERO during training.
+
+        Example with dropout=0.1 (10% dropout):
+          Input:  [0.5,  0.3,  0.7,  0.2,  0.9]
+          Mask:   [1.0,  0.0,  1.0,  1.0,  0.0]   ← random (10% chance of 0)
+          Output: [0.5,  0.0,  0.7,  0.2,  0.0]   ← multiplied by mask
+          Then:   [0.56, 0.0,  0.78, 0.22, 0.0]   ← scaled by 1/(1-0.1) = 1.11
+
+        WHY DO THIS?
+          1. Prevents overfitting: forces model to not rely on any single neuron
+          2. Acts as ensemble: different dropout masks = different network structures
+          3. Simple but very effective regularization technique
+
+        WHY PLACED HERE (after position encoding)?
+          - Applied to the FINAL embeddings before entering the encoder
+          - Also applied after EVERY attention layer and FFN in the encoder/decoder
+          - Each layer has its own dropout layer
         """
         batch_size, seq_len, d_model = x.shape
 
