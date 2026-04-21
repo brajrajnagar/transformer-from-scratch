@@ -18,6 +18,9 @@ python 04_encoder_layer.py
 python 05_decoder_layer.py
 python 06_full_transformer.py
 python 07_train_translate.py
+python 08_iwslt_vi_en.py --demo      # small built-in EN↔VI pairs
+python 08_iwslt_vi_en.py --full      # full IWSLT corpus (~133K pairs)
+python 08_iwslt_vi_en.py --infer     # interactive prompt using the saved model
 ```
 
 ## 🗂️ Lessons
@@ -31,6 +34,7 @@ python 07_train_translate.py
 | 5 | `05_decoder_layer.py` | Decoder Layer | Masked attention, cross-attention, 3 sublayers |
 | 6 | `06_full_transformer.py` | Full Model | Putting everything together, masks, forward pass |
 | 7 | `07_train_translate.py` | Training | Data prep, teacher forcing, greedy decoding, translation |
+| 8 | `08_iwslt_vi_en.py` | Real Dataset | IWSLT EN↔VI corpus, BPE tokenizer, LR warmup + cosine decay, gradient clipping, interactive inference |
 
 ## 🏗️ Architecture Diagram
 
@@ -93,6 +97,9 @@ source .venv/bin/activate
 
 # Install dependencies
 pip install torch numpy
+
+# Lesson 8 also needs:
+pip install tokenizers tqdm
 ```
 
 ## 📖 Key Concepts Explained
@@ -139,6 +146,25 @@ English:    'i am here'      → French:  'je suis ici'         ✓
 English:    'hello'          → French:  'bonjour'             ✓
 ```
 
+### Lesson 8 — Real Dataset (IWSLT Vietnamese–English)
+
+Lesson 8 trains on the full IWSLT EN↔VI corpus (~133K sentence pairs) with a real subword tokenizer (BPE via HuggingFace `tokenizers`). Data is sourced from [stefan-it/nmt-en-vi](https://github.com/stefan-it/nmt-en-vi) — drop the `.tgz` into `data/` and the script extracts it automatically on first run. It adds:
+
+- **LR warmup + cosine decay** (fixed so the schedule doesn't compound onto its own output — a bug that silently pinned LR at 0)
+- **Padding masks** applied to encoder self-attention and decoder self/cross-attention, with a consistent `1 = attend-to` convention
+- **Gradient clipping** (max-norm = 1.0)
+- **Checkpoint + tokenizer persistence** so you can reload without retraining:
+  - `best_iwslt_transformer.pth` — model weights + architecture config
+  - `en_tokenizer.json` / `vi_tokenizer.json` — saved BPE tokenizers
+- **`--infer` mode** — drops into an interactive EN→VI prompt:
+
+```
+$ python 08_iwslt_vi_en.py --infer
+EN> i am happy
+VI> tôi vui
+EN>
+```
+
 ## 📐 Model Configurations
 
 | Config | d_model | Heads | d_ff | Layers | Params |
@@ -154,3 +180,4 @@ English:    'hello'          → French:  'bonjour'             ✓
 - Each file is self-contained and runnable
 - Comments explain every design decision
 - The training in Lesson 7 uses a tiny dataset (28 examples) for fast demonstration
+- Lesson 8 scales up to a real corpus (IWSLT EN↔VI) with subword tokenization and an interactive inference mode
