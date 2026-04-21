@@ -29,4 +29,10 @@ Thumbs.db
 .ipynb_checkpoints
 
 # Environment variables
-.envbest_transformer.pth
+.env
+
+# Data and logs
+data/
+*_tokenizer.json
+*.log
+best_transformer.pth
