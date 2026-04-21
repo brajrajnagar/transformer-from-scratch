@@ -14,68 +14,61 @@ KEY INSIGHT: Attention allows the model to look at ALL other tokens in the
 sequence at once, making it highly parallelizable and great at capturing
 long-range dependencies.
 
-ARCHITECTURE OVERVIEW:
-======================
+ARCHITECTURE OVERVIEW (from the original paper figure):
+=======================================================
 
-The Transformer follows an ENCODER-DECODER architecture:
+                    ┌─────────────────────────────────────────────────┐
+                    │                  ENCODER                        │
+                    │                                                 │
+  Input Text ──────►│  ┌─────────┐  ┌─────────┐  ┌─────────┐        │
+                    │  │ Layer 1 │→│ Layer 2 │→│   ...   │        │
+                    │  └─────────┘  └─────────┘  └─────────┘        │
+                    │                                                 │
+                    │  Each layer contains:                         │
+                    │   ┌──────────────────┐                         │
+                    │   │ Self-Attention   │                         │
+                    │   │ + Feed-Forward   │                         │
+                    │   └──────────────────┘                         │
+                    └─────────────────────────────────────────────────┘
+                                      │
+                                      │ Contextualized
+                                      │ representations
+                                      ▼
+                    ┌─────────────────────────────────────────────────┐
+                    │                  DECODER                        │
+                    │                                                 │
+  Target Text ─────►│  ┌─────────┐  ┌─────────┐  ┌─────────┐   ┌────┴─────┐
+                    │  │ Layer 1 │→│ Layer 2 │→│   ...   │→│ Linear │→Softmax
+                    │  └─────────┘  └─────────┘  └─────────┘   └──────────┘
+                    │                                                 │
+                    │  Each layer contains:                         │
+                    │   ┌──────────────────────────┐                 │
+                    │   │ Masked Self-Attention    │                 │
+                    │   │ + Cross-Attention   ─────┼──── Encoder     │
+                    │   │ + Feed-Forward           │                 │
+                    │   └──────────────────────────┘                 │
+                    └─────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+                               Output Text
 
-  INPUT ("The cat sat")              TARGET ("<BOS> Le chat ...")
-          │                                    │
-          ▼                                    ▼
-   ┌──────────────┐                    ┌──────────────┐
-   │  EMBEDDING   │                    │  EMBEDDING   │
-   │ + POSITION   │                    │ + POSITION   │
-   └──────┬───────┘                    └──────┬───────┘
-          │                                    │
-          ▼                                    ▼
-   ┌──────────────┐                    ┌──────────────┐
-   │   ENCODER    │                    │   DECODER    │
-   │  (N layers)  │                    │  (N layers)  │
-   │              │                    │              │
-   │ Self-Attn    │                    │ Masked Attn  │
-   │      │       │                    │      │       │
-   │      ▼       │                    │      ▼       │
-   │   FFN        │                    │ Cross-Attn   │
-   │              │                    │      │       │
-   └──────┬───────┘                    │      ▼       │
-          │                            │    FFN       │
-          ▼                            │              │
-   Contextualized                     │              │
-   Vectors                            │              │
-                                      │              │
-                                      └──────┬───────┘
-                                             │
-                                             ▼
-                                    Token probabilities
-
-Inside each ENCODER layer:
-  Input -> Self-Attention -> Add+Norm -> FFN -> Add+Norm -> Output
-
-Inside each DECODER layer:
-  Input -> Masked Self-Attn -> Add+Norm -> Cross-Attn -> Add+Norm -> FFN -> Add+Norm -> Output
-
-Cross-Attention: Decoder uses its query (Q) to look at encoder's key/value (K, V).
-This is how the decoder "reads" the encoder's output.
-
-DATA FLOW (for translation: "Hello" -> "Bonjour"):
+DATA FLOW (for translation: "Hello" → "Bonjour"):
 ==================================================
 
-Step 1: EMBEDDING
-  "Hello" -> [723, 1045, 221]  (token IDs)
-          -> [d_model vector each]  (dense embeddings)
+Step 1: ENCODER SIDE (understand input)
+  "Hello" → Token IDs → Embedding + Position → Encoder Layers → Context vectors
 
-Step 2: ADD POSITION ENCODING
-  + positional signals so model knows ORDER
+Step 2: DECODER SIDE (generate output)
+  "<BOS>" → Token IDs → Embedding + Position → Decoder Layers → Logits → "Bonjour"
 
-Step 3: ENCODER LAYERS (x6)
-  Each layer: Self-Attention -> Feed-Forward
+Step 3: CROSS-ATTENTION connects them
+  Decoder layers "read" encoder output via cross-attention layers.
 
-Step 4: DECODER LAYERS (x6)
-  Each layer: Masked Attention -> Cross-Attention -> Feed-Forward
+Inside each ENCODER layer:
+  Input → Self-Attention → Add+Norm → FFN → Add+Norm → Output
 
-Step 5: OUTPUT PROBABILITIES
-  -> softmax -> probability over entire vocabulary
-  -> pick highest: "Bonjour"
+Inside each DECODER layer:
+  Input → Masked Self-Attn → Add+Norm → Cross-Attn → Add+Norm → FFN → Add+Norm → Output
 
 KEY HYPERPARAMETERS:
 ==================
@@ -132,50 +125,56 @@ class TransformerConfig:
 
 
 def print_architecture_diagram():
-    """Print a visual diagram of the Transformer."""
+    """Print a visual diagram of the Transformer, matching the paper figure."""
 
     print("=" * 70)
     print("       TRANSFORMER ARCHITECTURE (from 'Attention Is All You Need')")
     print("=" * 70)
     print()
 
-    print("  INPUT                           ENCODER               DECODER           OUTPUT")
-    print("  ('Hello')                                                  ('Bonjour')")
-    print("     |                                  |                       |              |")
-    print("     v                                  |                       |              |")
-    print("  +----------+                          |                       |              |")
-    print("  | Embedding|                          |                       |              |")
-    print("  +----+-----+                          |                       |              |")
-    print("       |                                 |                       |              |")
-    print("       v                                 |                       |              |")
-    print("  +--------------+                       |                       |              |")
-    print("  | Position Enc.|                       |                       |              |")
-    print("  +------+-------+                       |                       |              |")
-    print("         |                                |                       |              |")
-    print("         v                                |                       |              |")
-    print("  +--------------+                       |                       |              |")
-    print("  |   ENCODER    |                       |                       |              |")
-    print("  |  (N layers)  |                       |                       |              |")
-    print("  |              |                       |                       |              |")
-    print("  |  +--------+  |                       |  +--------------+     |              |")
-    print("  |  |Self-    |  |                       |  | Masked      |     |              |")
-    print("  |  |Attention|  |                       |  | Self-Attn   |     |              |")
-    print("  |  +----+----+  |                       |  +------+------+     |              |")
-    print("  |       |      |                       |         |            |              |")
-    print("  |  +--------+  |                       |  +------+------+     |              |")
-    print("  |  | FFN    |  |                       |  | Cross-      |     |              |")
-    print("  |  +--------+  |                       |  | Attention   |     |              |")
-    print("  |              |                       |  +------+------+     |              |")
-    print("  +------+-------+                       +------+-------+     |              |")
-    print("         |                                     |               |              |")
-    print("         v                                     v               v              v")
-    print("  +--------------+                    +--------------+  +--------------+")
-    print("  | Contextualized|                    |  Linear +    |  | Token Probs  |")
-    print("  | Representations|                   |  Softmax     |  |              |")
-    print("  +--------------+                    +--------------+  +--------------+")
+    print("                         ┌─────────────────────────────────────────┐")
+    print("                         │              ENCODER                     │")
+    print("                         │                                            │")
+    print("   Input Text ──────────►│  ┌─────────┐  ┌─────────┐  ┌─────────┐   │")
+    print("   (e.g., 'Hello')      │  │ Layer 1 │→│ Layer 2 │→│   ...   │   │")
+    print("                        │  └─────────┘  └─────────┘  └─────────┘   │")
+    print("                         │                                            │")
+    print("                         │  Each encoder layer:                      │")
+    print("                         │   ┌──────────────────────┐                │")
+    print("                         │   │ Self-Attention       │                │")
+    print("                         │   │ ──────────────────   │                │")
+    print("                         │   │ Feed-Forward         │                │")
+    print("                         │   └──────────────────────┘                │")
+    print("                         └────────────────┬────────────────────────┘")
+    print("                                          │")
+    print("                                          │ Contextualized")
+    print("                                          │ representations")
+    print("                                          ▼")
+    print("                         ┌─────────────────────────────────────────┐")
+    print("                         │              DECODER                     │")
+    print("                         │                                            │")
+    print("   Target Text ─────────►│  ┌─────────┐  ┌─────────┐  ┌─────────┐   │")
+    print("   (e.g., '<BOS>')       │  │ Layer 1 │→│ Layer 2 │→│   ...   │→│")
+    print("                        │  └─────────┘  └─────────┘  └─────────┘   │")
+    print("                         │                                            │")
+    print("                         │  Each decoder layer:                      │")
+    print("                         │   ┌──────────────────────────┐            │")
+    print("                         │   │ Masked Self-Attention    │            │")
+    print("                         │   │ ─────────────────────    │            │")
+    print("                         │   │ Cross-Attention   ───────┼──── Encoder│")
+    print("                         │   │ (queries encoder output) │            │")
+    print("                         │   │ Feed-Forward             │            │")
+    print("                         │   └──────────────────────────┘            │")
+    print("                         └────────────────┬────────────────────────┘")
+    print("                                          │")
+    print("                                          ▼")
+    print("                         ┌─────────────────────────────────────────┐")
+    print("                         │  Linear → Softmax → Output Text         │")
+    print("                         │  (e.g., 'Bonjour')                      │")
+    print("                         └─────────────────────────────────────────┘")
     print()
     print()
-    print("  KEY: Cross-Attention connects Encoder -> Decoder")
+    print("  KEY: Cross-attention arrows flow FROM encoder TO decoder")
     print("       Decoder queries (Q) attend to Encoder keys/values (K, V)")
     print()
 
