@@ -29,4 +29,4 @@ Thumbs.db
 .ipynb_checkpoints
 
 # Environment variables
-.env
+.envbest_transformer.pth
