@@ -15,90 +15,70 @@ sequence at once, making it highly parallelizable and great at capturing
 long-range dependencies.
 
 ARCHITECTURE OVERVIEW:
-=====================
+======================
 
-                    ┌─────────────────────────────────────────────────┐
-                    │                  TRANSFORMER                     │
-                    │                                                  │
-  Input Text ──────►│  ENCODER                                         │
-                    │  (understands the input)                        │
-                    │        │                                        │
-                    │        ▼                                        │
-                    │  DECODER                                        │
-                    │  (generates output)      ───►  Output Text      │
-                    └─────────────────────────────────────────────────┘
+The Transformer follows an ENCODER-DECODER architecture:
 
-ENCODER (stack of N identical layers, typically N=6):
-------------------------------------------------------
-Each encoder layer does TWO things:
-  1. Self-Attention: Each token looks at ALL other tokens to understand context
-  2. Feed-Forward: Process each token's representation independently
+  INPUT ("The cat sat")              TARGET ("<BOS> Le chat ...")
+          │                                    │
+          ▼                                    ▼
+   ┌──────────────┐                    ┌──────────────┐
+   │  EMBEDDING   │                    │  EMBEDDING   │
+   │ + POSITION   │                    │ + POSITION   │
+   └──────┬───────┘                    └──────┬───────┘
+          │                                    │
+          ▼                                    ▼
+   ┌──────────────┐                    ┌──────────────┐
+   │   ENCODER    │                    │   DECODER    │
+   │  (N layers)  │                    │  (N layers)  │
+   │              │                    │              │
+   │ Self-Attn    │                    │ Masked Attn  │
+   │      │       │                    │      │       │
+   │      ▼       │                    │      ▼       │
+   │   FFN        │                    │ Cross-Attn   │
+   │              │                    │      │       │
+   └──────┬───────┘                    │      ▼       │
+          │                            │    FFN       │
+          ▼                            │              │
+   Contextualized                     │              │
+   Vectors                            │              │
+                                      │              │
+                                      └──────┬───────┘
+                                             │
+                                             ▼
+                                    Token probabilities
 
-                    ┌─────────────────────────────────────┐
-Input ────────────►│  Encoder Layer                       │
-                   │                                      │
-                   │  ┌──────────────────────────────┐    │
-                   │  │   Self-Attention             │    │
-                   │  │   (each token attends all)   │    │
-                   │  └──────────────┬───────────────┘    │
-                   │                 ▼                     │
-                   │  ┌──────────────────────────────┐    │
-                   │  │   Feed-Forward Network       │    │
-                   │  │   (process each token)       │    │
-                   │  └──────────────┬───────────────┘    │
-                   │                 ▼                     │
-                   │   Output (rich contextualized)       │
-                   └─────────────────────────────────────┘
+Inside each ENCODER layer:
+  Input -> Self-Attention -> Add+Norm -> FFN -> Add+Norm -> Output
 
-DECODER (stack of N identical layers, typically N=6):
-------------------------------------------------------
-Each decoder layer does THREE things:
-  1. Masked Self-Attention: Look at PREVIOUS tokens only (no cheating ahead!)
-  2. Cross-Attention: Look at encoder output (understand the input)
-  3. Feed-Forward: Process each token's representation
+Inside each DECODER layer:
+  Input -> Masked Self-Attn -> Add+Norm -> Cross-Attn -> Add+Norm -> FFN -> Add+Norm -> Output
 
-                    ┌─────────────────────────────────────────┐
-Input ────────────►│  Decoder Layer                           │
-                   │                                          │
-                   │  ┌──────────────────────────────────┐    │
-                   │  │  Masked Self-Attention           │    │
-                   │  │  (look at previous tokens only)  │    │
-                   │  └──────────────┬───────────────────┘    │
-                   │                 ▼                        │
-                   │  ┌──────────────────────────────────┐    │
-                   │  │  Cross-Attention                 │    │
-                   │  │  (look at encoder output)        │    │
-                   │  └──────────────┬───────────────────┘    │
-                   │                 ▼                        │
-                   │  ┌──────────────────────────────────┐    │
-                   │  │  Feed-Forward Network            │    │
-                   │  └──────────────┬───────────────────┘    │
-                   │                 ▼                        │
-                   │   Output                                     │
-                   └─────────────────────────────────────────┘
+Cross-Attention: Decoder uses its query (Q) to look at encoder's key/value (K, V).
+This is how the decoder "reads" the encoder's output.
 
-DATA FLOW (for translation: "Hello" → "Bonjour"):
+DATA FLOW (for translation: "Hello" -> "Bonjour"):
 ==================================================
 
 Step 1: EMBEDDING
-  "Hello" → [723, 1045, 221]  (token IDs)
-          → [d_model vector each]  (dense embeddings)
+  "Hello" -> [723, 1045, 221]  (token IDs)
+          -> [d_model vector each]  (dense embeddings)
 
 Step 2: ADD POSITION ENCODING
   + positional signals so model knows ORDER
 
 Step 3: ENCODER LAYERS (x6)
-  Each layer: Self-Attention → Feed-Forward
+  Each layer: Self-Attention -> Feed-Forward
 
 Step 4: DECODER LAYERS (x6)
-  Each layer: Masked Attention → Cross-Attention → Feed-Forward
+  Each layer: Masked Attention -> Cross-Attention -> Feed-Forward
 
 Step 5: OUTPUT PROBABILITIES
-  → softmax → probability over entire vocabulary
-  → pick highest: "Bonjour"
+  -> softmax -> probability over entire vocabulary
+  -> pick highest: "Bonjour"
 
 KEY HYPERPARAMETERS:
-===================
+==================
 """
 
 import torch
@@ -159,54 +139,44 @@ def print_architecture_diagram():
     print("=" * 70)
     print()
 
-    print("┌─────────────────────────────────────────────────────────────────┐")
-    print("│                     THE TRANSFORMER                             │")
-    print("│                                                                 │")
-    print("│   ┌──────────────┐              ┌──────────────┐                │")
-    print("│   │   INPUT      │              │   OUTPUT     │                │")
-    print("│   │   TEXT       │              │   TEXT       │                │")
-    print("│   └──────┬───────┘              └──────▲───────┘                │")
-    print("│          │                             │                        │")
-    print("│          ▼                             │                        │")
-    print("│   ┌──────────────┐              ┌──────────────┐                │")
-    print("│   │   EMBEDDING  │              │  SOFTMAX     │                │")
-    print("│   └──────┬───────┘              └──────────────┘                │")
-    print("│          │                             │                        │")
-    print("│          ▼                             │                        │")
-    print("│   ┌──────────────┐              ┌──────────────┐                │")
-    print("│   │POSITION ENC. │              │  DECODER     │◄─────────────────┐")
-    print("│   └──────┬───────┘              │  (N layers)  │                  │")
-    print("│          │                      └──────┬───────┘                  │")
-    print("│          │                             │                          │")
-    print("│          ▼                             ▼                          │")
-    print("│   ┌──────────────┐              ┌──────────────┐                  │")
-    print("│   │  ENCODER     │              │   ATTENTION  │                  │")
-    print("│   │  (N layers)  │              │   FROM       │                  │")
-    print("│   │              │              │   ENCODER    │                  │")
-    print("│   │  ┌────────┐  │              └──────────────┘                  │")
-    print("│   │  │Self-     │ │                            │                  │")
-    print("│   │  │Attention│  │                            │                  │")
-    print("│   │  └────────┘  │                            │                  │")
-    print("│   │      │       │                            │                  │")
-    print("│   │  ┌────────┐  │                            │                  │")
-    print("│   │  │Feed-    │  │                            │                  │")
-    print("│   │  │Forward │  │                            │                  │")
-    print("│   │  └────────┘  │                            │                  │")
-    print("│   └──────────────┘                            │                  │")
-    print("│            ▲                                  │                  │")
-    print("│            └──────────────────────────────────┘                  │")
-    print("└─────────────────────────────────────────────────────────────────┘")
+    print("  INPUT                           ENCODER               DECODER           OUTPUT")
+    print("  ('Hello')                                                  ('Bonjour')")
+    print("     |                                  |                       |              |")
+    print("     v                                  |                       |              |")
+    print("  +----------+                          |                       |              |")
+    print("  | Embedding|                          |                       |              |")
+    print("  +----+-----+                          |                       |              |")
+    print("       |                                 |                       |              |")
+    print("       v                                 |                       |              |")
+    print("  +--------------+                       |                       |              |")
+    print("  | Position Enc.|                       |                       |              |")
+    print("  +------+-------+                       |                       |              |")
+    print("         |                                |                       |              |")
+    print("         v                                |                       |              |")
+    print("  +--------------+                       |                       |              |")
+    print("  |   ENCODER    |                       |                       |              |")
+    print("  |  (N layers)  |                       |                       |              |")
+    print("  |              |                       |                       |              |")
+    print("  |  +--------+  |                       |  +--------------+     |              |")
+    print("  |  |Self-    |  |                       |  | Masked      |     |              |")
+    print("  |  |Attention|  |                       |  | Self-Attn   |     |              |")
+    print("  |  +----+----+  |                       |  +------+------+     |              |")
+    print("  |       |      |                       |         |            |              |")
+    print("  |  +--------+  |                       |  +------+------+     |              |")
+    print("  |  | FFN    |  |                       |  | Cross-      |     |              |")
+    print("  |  +--------+  |                       |  | Attention   |     |              |")
+    print("  |              |                       |  +------+------+     |              |")
+    print("  +------+-------+                       +------+-------+     |              |")
+    print("         |                                     |               |              |")
+    print("         v                                     v               v              v")
+    print("  +--------------+                    +--------------+  +--------------+")
+    print("  | Contextualized|                    |  Linear +    |  | Token Probs  |")
+    print("  | Representations|                   |  Softmax     |  |              |")
+    print("  +--------------+                    +--------------+  +--------------+")
     print()
-
-    print("KEY COMPONENTS:")
-    print("-" * 70)
-    print("1. EMBEDDING     : Convert tokens → dense vectors")
-    print("2. POSITION ENC. : Add info about token position/order")
-    print("3. SELF-ATTENTION: Each token attends to ALL other tokens")
-    print("4. CROSS-ATTN    : Decoder attends to encoder output")
-    print("5. FEED-FORWARD  : Per-token fully-connected network")
-    print("6. LAYER NORM    : Stabilize training")
-    print("7. RESIDUAL      : Skip connections (helps gradient flow)")
+    print()
+    print("  KEY: Cross-Attention connects Encoder -> Decoder")
+    print("       Decoder queries (Q) attend to Encoder keys/values (K, V)")
     print()
 
 
@@ -227,9 +197,9 @@ def explain_attention_simple():
 
     print("In the Transformer, EVERY token does this simultaneously:")
     print()
-    print('  "The"  → looks at: cat, sat, mat')
-    print('  "cat"  → looks at: The, sat, on, the, mat')
-    print('  "sat"  → looks at: cat, on, the, mat')
+    print('  "The"  -> looks at: cat, sat, mat')
+    print('  "cat"  -> looks at: The, sat, on, the, mat')
+    print('  "sat"  -> looks at: cat, on, the, mat')
     print('  ...and so on for EVERY token')
     print()
 
@@ -292,10 +262,10 @@ def explain_multi_head_attention():
     print()
     print("Example with 4 heads:")
     print()
-    print("  Head 1  → might learn: subject-verb relationships")
-    print("  Head 2  → might learn: pronoun-antecedent relationships")
-    print("  Head 3  → might learn: adjective-noun relationships")
-    print("  Head 4  → might learn: temporal relationships")
+    print("  Head 1  -> might learn: subject-verb relationships")
+    print("  Head 2  -> might learn: pronoun-antecedent relationships")
+    print("  Head 3  -> might learn: adjective-noun relationships")
+    print("  Head 4  -> might learn: temporal relationships")
     print()
     print("Then we CONCATENATE all heads and project back to d_model.")
     print()
@@ -308,8 +278,8 @@ def explain_multi_head_attention():
     print(f"  d_k = d_v = d_model / n_heads = {config.d_k}")
     print()
     print("Each head operates in a lower-dimensional space:")
-    print(f"  Each head: {config.d_k} dimensions → attention → {config.d_v} dimensions")
-    print(f"  All heads concatenated: {config.n_heads} × {config.d_v} = {config.d_model}")
+    print(f"  Each head: {config.d_k} dimensions -> attention -> {config.d_v} dimensions")
+    print(f"  All heads concatenated: {config.n_heads} x {config.d_v} = {config.d_model}")
     print()
 
 
@@ -322,7 +292,7 @@ def explain_position_encoding():
     print()
 
     print("Self-attention is PERMUTATION INVARIANT:")
-    print("  'The cat sat'  → same output as  'cat The sat'  → 'sat The cat'")
+    print("  'The cat sat'  -> same output as  'cat The sat'  -> 'sat The cat'")
     print()
     print("But word ORDER matters! So we ADD position information:")
     print()
@@ -354,9 +324,9 @@ def explain_residual_and_layernorm():
     print("  output = x + Sublayer(x)")
     print()
     print("  Why?")
-    print("    • Helps gradients flow through deep networks")
-    print("    • Easier to train (vanishing gradient problem)")
-    print("    • Model can always choose to 'skip' the transformation")
+    print("    - Helps gradients flow through deep networks")
+    print("    - Easier to train (vanishing gradient problem)")
+    print("    - Model can always choose to 'skip' the transformation")
     print()
 
     print("LAYER NORMALIZATION:")
@@ -365,12 +335,12 @@ def explain_residual_and_layernorm():
     print("  normalizes per-sample instead of across batch)")
     print()
     print("  Why LayerNorm instead of BatchNorm?")
-    print("    • Works well with small batch sizes")
-    print("    • More stable for sequence models")
+    print("    - Works well with small batch sizes")
+    print("    - More stable for sequence models")
     print()
 
     print("COMBINED (after each sublayer):")
-    print("  x → Sublayer(x) → + → LayerNorm → Output")
+    print("  x -> Sublayer(x) -> + -> LayerNorm -> Output")
     print("       (residual connection)    ")
     print()
 
@@ -379,10 +349,10 @@ def main():
     """Main function to run the overview."""
 
     print()
-    print("╔" + "═" * 68 + "╗")
-    print("║" + " " * 15 + "TRANSFORMER FROM SCRATCH - LESSON 1" + " " * 23 + "║")
-    print("║" + " " * 20 + "Architecture Overview" + " " * 28 + "║")
-    print("╚" + "═" * 68 + "╝")
+    print("+" + "=" * 68 + "+")
+    print("|" + " " * 15 + "TRANSFORMER FROM SCRATCH - LESSON 1" + " " * 23 + "|")
+    print("|" + " " * 20 + "Architecture Overview" + " " * 28 + "|")
+    print("+" + "=" * 68 + "+")
     print()
 
     # Print architecture diagram
@@ -413,7 +383,7 @@ def main():
     print("We'll implement: EMBEDDINGS + POSITION ENCODING")
     print()
     print("This is the FIRST step of the pipeline:")
-    print("  Input text → Token IDs → Dense embeddings → + Position encoding")
+    print("  Input text -> Token IDs -> Dense embeddings -> + Position encoding")
     print()
     print("Run: python 02_embeddings.py")
     print("=" * 70)

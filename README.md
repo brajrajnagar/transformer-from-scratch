@@ -34,8 +34,10 @@ python 07_train_translate.py
 
 ## 🏗️ Architecture Diagram
 
+The Transformer follows an **encoder-decoder** architecture (Vaswani et al., 2017):
+
 ```
-INPUT: "The cat sat"                    TARGET: "<BOS> Le chat a été assis <EOS>"
+INPUT: "The cat sat"                    TARGET: "<BOS> Le chat ... <EOS>"
          │                                      │
          ▼                                      ▼
    ┌──────────────┐                        ┌──────────────┐
@@ -48,18 +50,37 @@ INPUT: "The cat sat"                    TARGET: "<BOS> Le chat a été assis <EO
    │   ENCODER    │                        │   DECODER    │
    │  (N layers)  │                        │  (N layers)  │
    │              │                        │              │
-   │ Self-Attn   │◄────── Cross-Attn ────►│ Masked Attn  │
-   │ FFN         │                        │ Cross-Attn   │
-   │ FFN         │                        │ FFN          │
-   └──────┬───────┘                        └──────┬───────┘
-          │                                       │
-          ▼                                       ▼
+   │ ┌──────────┐ │                        │ ┌──────────┐ │
+   │ │Self-Attn │ │                        │ │Masked    │ │
+   │ │          │ │                        │ │Self-Attn │ │
+   │ └──────────┘ │                        │ └──────────┘ │
+   │      │       │                        │      │       │
+   │ ┌──────────┐ │                        │ ┌──────────┐ │
+   │ │  FFN     │ │                        │ │Cross-     │ │
+   │ └──────────┘ │                        │ │Attention  │ │
+   │              │                        │ │          │ │
+   │              │                        │ └────┬─────┘ │
+   └──────┬───────┘                        └────┬─┴──────┘
+          │                                     │
+          │  Encoder Output                     │  Decoder Output
+          │  (contextualized                    │  (token logits
+          │   representations)                  │  over vocab)
+          ▼                                     ▼
    ┌──────────────┐                        ┌──────────────┐
-   │  OUTPUT:     │                        │  Linear +    │
-   │ Contextual   │                        │  Softmax     │
-   │ embeddings   │                        │              │
+   │              │                        │  Linear +    │
+   │              │                        │  Softmax     │
    └──────────────┘                        └──────────────┘
+
+   ═══════════════════════════════════════════════════════
+   Cross-Attention: Decoder queries (Q) attend to
+   Encoder keys/values (K, V) — flows ↓ from encoder
+   ═══════════════════════════════════════════════════════
 ```
+
+Each encoder/decoder block contains **N=6 identical layers** (in the base model).
+Inside each layer:
+- **Encoder**: Self-Attention → Add+Norm → FFN → Add+Norm
+- **Decoder**: Masked Self-Attention → Add+Norm → Cross-Attention → Add+Norm → FFN → Add+Norm
 
 ## 🔧 Setup
 
