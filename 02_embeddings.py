@@ -124,6 +124,33 @@ class PositionalEncoding(nn.Module):
 
         # Divisor: 10000^(-2i/d_model) for each dimension pair
         # Shape: (d_model/2,)
+        #
+        # MATH: Why use exp(log(10000)) instead of direct power?
+        # ─────────────────────────────────────────────────────────
+        #
+        # The formula says: div_term = 10000^(-2i/d_model)
+        #
+        # But we rewrite using the identity: a^x = e^(x * ln(a))
+        #
+        #   10000^(-2i/d_model)
+        # = e^((-2i/d_model) * ln(10000))
+        # = e^(2i * (-ln(10000)/d_model))
+        # = exp(2i * (-log(10000)/d_model))
+        #
+        # Where 2i comes from arange(0, d_model, 2) = [0, 2, 4, ..., d_model-2]
+        #
+        # Example with d_model=512, i=0 (so 2i=0):
+        #   10000^0         = 1.0
+        #   exp(0 * ...)    = 1.0  ✓
+        #
+        # Example with d_model=512, i=1 (so 2i=2):
+        #   10000^(-2/512)  = 10000^(-0.003906)  ≈ 0.9647
+        #   exp(2 * (-log(10000)/512)) = exp(2 * (-9.21/512)) = exp(-0.03598) ≈ 0.9647
+        #
+        # WHY NOT just compute 10000^(-2i/d_model) directly?
+        #   1. Numerical stability: exp/log avoids overflow/underflow for extreme values
+        #   2. The original paper used this formulation
+        #   3. Works well with floating point arithmetic
         div_term = torch.exp(
             torch.arange(0, d_model, 2, dtype=torch.float) * (-math.log(10000.0) / d_model)
         )
