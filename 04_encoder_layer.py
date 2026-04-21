@@ -32,28 +32,57 @@ class FeedForwardNetwork(nn.Module):
     """
     The position-wise Feed-Forward Network in each encoder layer.
 
-    The FFN is applied to EACH position independently and identically.
+    THE BIG QUESTION: WHY DO WE NEED THIS?
+    ───────────────────────────────────────
+    After self-attention, every token has gathered information from other tokens.
+    BUT attention alone is just a weighted SUM. It's a linear operation (roughly).
+    We need NON-LINEARITY to make the model powerful.
+
+    THE PROBLEM WITH ATTENTION ALONE:
+    ─────────────────────────────────
+    Self-attention computes: weighted_sum(values)
+    This is essentially: output = Σ attention_weight_i × value_i
+    Which is a LINEAR combination of values.
+
+    A network with ONLY linear layers is just ONE linear layer, no matter how deep.
+    It can only learn linear relationships. But language is HIGHLY NON-LINEAR!
+
+    THE SOLUTION: Feed-Forward Network (FFN)
+    ───────────────────────────────────────
+    The FFN adds TWO things:
+    1. NON-LINEARITY (via ReLU activation)
+    2. LEARNED TRANSFORMATION (two linear layers with ReLU in between)
 
     ARCHITECTURE:
     ─────────────
     Input:  (batch, seq_len, d_model)
       ↓
-    Linear 1: d_model → d_ff       (expand)
+    Linear 1: d_model → d_ff       (expand to higher dimension)
       ↓
-    ReLU activation
+    ReLU activation                  ← THIS adds non-linearity!
       ↓
     Linear 2: d_ff → d_model       (project back)
       ↓
     Output: (batch, seq_len, d_model)
 
     DIMENSIONS (original paper):
-      d_model = 512, d_ff = 2048
+      d_model = 512, d_ff = 2048  (4× expansion)
 
     WHY d_ff > d_model?
     ───────────────────
     Expanding to a higher dimension gives the network more capacity
     to learn complex transformations, then projects back down.
     It's like a bottleneck layer.
+
+    THE INTUITION:
+    ──────────────
+    Think of the FFN as the "thinking" part of each layer:
+      - Self-attention: "What information do I need from other tokens?"
+      - FFN: "Now let me PROCESS that information using what I've learned."
+
+    Analogy: In a team project:
+      - Self-attention = gathering input from teammates
+      - FFN = your individual thinking/synthesis process
 
     NOTE: This is "position-wise" because the SAME FFN is applied to
     every position independently. Position 0 and Position 1 both use
