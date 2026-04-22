@@ -1909,18 +1909,175 @@ def generate_translation(model, src_text, en_vocab, vi_vocab, max_len: int = 50,
     Returns:
         Generated Vietnamese translation string
 
-    Example:
-        >>> # Assume trained model and vocabularies
-        >>> model = Transformer(...)
-        >>> model.load_state_dict(torch.load("best_iwslt_transformer.pth"))
-        >>> # Translate a sentence
-        >>> translation = generate_translation(model, "hello", en_vocab, vi_vocab)
-        >>> print(translation)
-        'xin chào'
-        >>> # Translate multiple sentences
-        >>> for en in ["thank you", "goodbye", "how are you"]:
-        ...     vi = generate_translation(model, en, en_vocab, vi_vocab)
-        ...     print(f"{en} -> {vi}")
+    Example — Step-by-Step Matrix Computations:
+    ─────────────────────────────────────────────────────────────────────
+    
+    Let's trace how the model translates: "i am happy" → "tôi vui"
+    
+    Model Configuration (Tiny):
+        - d_model = 64 (embedding dimension)
+        - n_heads = 4 (attention heads)
+        - d_head = d_model / n_heads = 16
+        - src_vocab_size = 1000 (English)
+        - tgt_vocab_size = 1000 (Vietnamese)
+        - max_seq_len = 50
+    
+    STEP 0: Encode Source Sentence
+    ─────────────────────────────────────────────────────────────────────
+    
+    Input: "i am happy"
+    After tokenization: [2, 15, 42, 88, 3]  # [<bos>, "i", "am", "happy", <eos>]
+    
+    src_tensor shape: (1, 5)  # (batch_size=1, seq_len=5)
+    
+    src_padding_mask shape: (1, 1, 1, 5)
+        - Created by: (src_tensor != pad_id).unsqueeze(1).unsqueeze(2)
+        - Value: [1, 1, 1, 1, 1]  (all positions are valid)
+    
+    Encoder processes src_tensor:
+        - Embedding: (1, 5) → (1, 5, 64)  # Each token → 64-dim vector
+        - Positional encoding added
+        - Through N encoder layers (self-attention + FFN)
+    
+    encoder_output shape: (1, 5, 64)
+        - 5 positions, each with 64-dimensional contextual representation
+        - This is K and V for cross-attention in decoder
+    
+    STEP 1: First Decoding Iteration (Predict First Token)
+    ─────────────────────────────────────────────────────────────────────
+    
+    tgt_ids = [2]  # Just <bos>
+    tgt_tensor shape: (1, 1)  # (batch=1, seq_len=1)
+    
+    causal_mask shape: (1, 1)
+        [[1.]]  # Single position can see itself
+    
+    Decoder forward pass:
+        tgt_tensor:     (1, 1)
+        encoder_output: (1, 5, 64)
+        src_padding_mask: (1, 1, 1, 5)
+        causal_mask:    (1, 1)
+    
+    Inside Decoder Layer:
+    ─────────────────────────────────────────────────────────────────────
+    
+    a) Masked Self-Attention:
+       - Q, K, V all from tgt_tensor (decoder input)
+       - Input shape: (1, 1, 64)  # after embedding + pos encoding
+       - Q, K, V shapes: (1, 4, 1, 16)  # (batch, heads, seq_len, d_head)
+       - attention output: (1, 1, 64)
+    
+    b) Cross-Attention:
+       - Q from decoder self-attention: (1, 4, 1, 16)
+       - K, V from encoder_output: (1, 4, 5, 16)  # 5 source positions
+       - attention scores: (1, 4, 1, 5)  # attend to 5 source tokens
+       - attention output: (1, 1, 64)
+    
+    c) FFN:
+       - Input: (1, 1, 64)
+       - Expanded: (1, 1, 128)  # d_ff = 128
+       - Output: (1, 1, 64)
+    
+    decoder_output shape: (1, 1, 64)
+    
+    Output projection:
+       logits = model.output_linear(decoder_output[:, -1, :])
+       decoder_output[:, -1, :]: (1, 64)  # take last position
+       output_linear: (1, 64) → (1, 1000)  # vocab_size
+    
+    logits shape: (1, 1000)
+    probs = softmax(logits): (1, 1000)  # probability over all tokens
+    
+    Suppose highest probability is token 45 ("tôi"):
+       next_token = 45
+    
+    STEP 2: Second Decoding Iteration (Predict Second Token)
+    ─────────────────────────────────────────────────────────────────────
+    
+    tgt_ids = [2, 45]  # [<bos>, "tôi"]
+    tgt_tensor shape: (1, 2)
+    
+    causal_mask shape: (2, 2)
+        [[1., 0.],   # Position 0 can see: [0]
+         [1., 1.]]   # Position 1 can see: [0, 1]
+    
+    Decoder forward pass:
+        tgt_tensor:     (1, 2)
+        encoder_output: (1, 5, 64)  # Reused from encoding step
+        src_padding_mask: (1, 1, 1, 5)  # Reused
+        causal_mask:    (2, 2)
+    
+    Inside Decoder Layer:
+    ─────────────────────────────────────────────────────────────────────
+    
+    a) Masked Self-Attention:
+       - Input: (1, 2, 64)  # 2 target tokens embedded
+       - Q, K, V: (1, 4, 2, 16)
+       - attention scores: (1, 4, 2, 2) masked with causal
+       - attention output: (1, 2, 64)
+    
+    b) Cross-Attention:
+       - Q from decoder: (1, 4, 2, 16)
+       - K, V from encoder: (1, 4, 5, 16)
+       - attention scores: (1, 4, 2, 5)  # 2 target positions × 5 source
+       - Each target position attends to relevant source positions
+       - attention output: (1, 2, 64)
+    
+    c) FFN:
+       - Input: (1, 2, 64)
+       - Output: (1, 2, 64)
+    
+    decoder_output shape: (1, 2, 64)
+    
+    Output projection (only last position):
+       decoder_output[:, -1, :]: (1, 64)  # position 1 ("tôi")
+       logits: (1, 1000)
+       probs: (1, 1000)
+    
+    Suppose highest probability is token 72 ("vui"):
+       next_token = 72
+    
+    STEP 3: Third Decoding Iteration (Predict <eos>)
+    ─────────────────────────────────────────────────────────────────────
+    
+    tgt_ids = [2, 45, 72]  # [<bos>, "tôi", "vui"]
+    tgt_tensor shape: (1, 3)
+    
+    causal_mask shape: (3, 3)
+        [[1., 0., 0.],   # Position 0 can see: [0]
+         [1., 1., 0.],   # Position 1 can see: [0, 1]
+         [1., 1., 1.]]   # Position 2 can see: [0, 1, 2]
+    
+    Decoder forward pass (same pattern):
+        decoder_output shape: (1, 3, 64)
+        logits: (1, 1000)
+    
+    Suppose highest probability is token 3 (<eos>):
+       next_token = 3  # Stop decoding!
+    
+    Generated: [45, 72]  # "tôi vui"
+    
+    KEY INSIGHTS:
+    ─────────────────────────────────────────────────────────────────────
+    
+    1. Encoder runs ONCE, decoder runs for each generated token
+    
+    2. Cross-attention shapes:
+       - Q: (batch, heads, tgt_len, d_head)
+       - K, V: (batch, heads, src_len, d_head)
+       - Output: (batch, heads, tgt_len, d_head)
+    
+    3. Causal mask grows each step:
+       - Step 1: (1, 1)
+       - Step 2: (2, 2)
+       - Step 3: (3, 3)
+    
+    4. We only use the LAST position's output for prediction:
+       decoder_output[:, -1, :] extracts the newest token's representation
+    
+    5. Matrix dimensions flow:
+       (1, seq_len) → embed → (1, seq_len, 64) → attention → (1, seq_len, 64)
+       → FFN → (1, seq_len, 64) → output_linear → (1, seq_len, 1000)
     """
     model.eval()
 
