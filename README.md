@@ -41,44 +41,67 @@ python 08_iwslt_vi_en.py --infer     # interactive prompt using the saved model
 The Transformer follows an **encoder-decoder** architecture (Vaswani et al., 2017):
 
 ```
-INPUT: "The cat sat"                    TARGET: "<BOS> Le chat ... <EOS>"
-         │                                      │
-         ▼                                      ▼
-   ┌──────────────┐                        ┌──────────────┐
-   │  EMBEDDING   │                        │  EMBEDDING   │
-   │ + POSITION   │                        │ + POSITION   │
-   └──────┬───────┘                        └──────┬───────┘
-          │                                       │
-          ▼                                       ▼
-   ┌──────────────┐                        ┌──────────────┐
-   │   ENCODER    │                        │   DECODER    │
-   │  (N layers)  │                        │  (N layers)  │
-   │              │                        │              │
-   │ ┌──────────┐ │                        │ ┌──────────┐ │
-   │ │Self-Attn │ │                        │ │Masked    │ │
-   │ │          │ │                        │ │Self-Attn │ │
-   │ └──────────┘ │                        │ └──────────┘ │
-   │      │       │                        │      │       │
-   │ ┌──────────┐ │                        │ ┌──────────┐ │
-   │ │  FFN     │ │                        │ │Cross-     │ │
-   │ └──────────┘ │                        │ │Attention  │ │
-   │              │                        │ │          │ │
-   │              │                        │ └────┬─────┘ │
-   └──────┬───────┘                        └────┬─┴──────┘
-          │                                     │
-          │  Encoder Output                     │  Decoder Output
-          │  (contextualized                    │  (token logits
-          │   representations)                  │  over vocab)
-          ▼                                     ▼
-   ┌──────────────┐                        ┌──────────────┐
-   │              │                        │  Linear +    │
-   │              │                        │  Softmax     │
-   └──────────────┘                        └──────────────┘
-
-   ═══════════════════════════════════════════════════════
-   Cross-Attention: Decoder queries (Q) attend to
-   Encoder keys/values (K, V) — flows ↓ from encoder
-   ═══════════════════════════════════════════════════════
+                    ENCODER                          DECODER
+   ──────────────────────────              ──────────────────────────
+   Input: "The cat sat"                    Output: "Le chat est assis"
+                                               │
+                                               ▼
+   ┌─────────────┐                      ┌─────────────┐
+   │   INPUT     │                      │   OUTPUT    │
+   │  EMBEDDING  │                      │  EMBEDDING  │
+   │  + POS ENC  │                      │  + POS ENC  │
+   └──────┬──────┘                      └──────┬──────┘
+          │                                    │
+          ▼                                    ▼
+   ┌─────────────────┐                  ┌─────────────────┐
+   │   ENCODER       │                  │   DECODER       │
+   │   LAYER 1       │                  │   LAYER 1       │
+   │ ┌─────────────┐ │                  │ ┌─────────────┐ │
+   │ │ Multi-Head  │ │                  │ │ Masked      │ │
+   │ │ Self-Attn   │ │                  │ │ Self-Attn   │ │
+   │ │ (Q=K=V)     │ │                  │ │ (causal)    │ │
+   │ └──────┬──────┘ │                  │ └──────┬──────┘ │
+   │        │        │                  │        │        │
+   │   ┌────▼────┐   │                  │   ┌────▼────┐   │
+   │   │Add+Norm │   │                  │   │Add+Norm │   │
+   │   └────┬────┘   │                  │   └────┬────┘   │
+   │        │        │                  │        │        │
+   │   ┌────▼────┐   │       ┌─────►    │   ┌────▼────┐   │
+   │   │   FFN   │   │       │ Q        │   │ Cross-   │   │
+   │   └────┬────┘   │       │ K,V      │   │ Attention │  │
+   │        │        │       │          │   └────┬────┘   │
+   │   ┌────▼────┐   │       │          │   ┌────▼────┐   │
+   │   │Add+Norm │   │       │          │   │Add+Norm │   │
+   │   └────┬────┘   │       │          │   └────┬────┘   │
+   └────────┼────────┘       │          │        │        │
+            │                │          │   ┌────▼────┐   │
+            │                │          │   │   FFN   │   │
+            │                │          │   └────┬────┘   │
+            │                │          │        │        │
+            │                │          │   ┌────▼────┐   │
+            │                │          │   │Add+Norm │   │
+            │                │          │   └────┬────┘   │
+            │                │          └────────┼────────┘
+            │                │                   │
+            ▼                │                   ▼
+   ┌─────────────────┐       │          ┌─────────────────┐
+   │   ENCODER       │       │          │   DECODER       │
+   │   LAYER N       │       │          │   LAYER N       │
+   │   (same as L1)  │       │          │   (same as L1)  │
+   └────────┬────────┘       │          └────────┬────────┘
+            │                │                   │
+            │                │                   ▼
+            │                │          ┌─────────────────┐
+            │                │          │   LINEAR +      │
+            │                │          │   SOFTMAX       │
+            │                │          └────────┬────────┘
+            │                │                   │
+            ▼                │                   ▼
+   Encoder Output            │          Output Probabilities
+   (context vectors)         │          over vocabulary
+                             │
+                             ▼
+                    Generated Translation
 ```
 
 Each encoder/decoder block contains **N=6 identical layers** (in the base model).
