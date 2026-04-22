@@ -1687,12 +1687,79 @@ def train_epoch(model, dataloader, optimizer, criterion, device, current_step: i
         # tgt_input  = tgt_batch[:, :-1]   # Decoder INPUT (what decoder sees)
         # tgt_target = tgt_batch[:, 1:]    # Decoder TARGET (what decoder should predict)
         #
-        #   tgt_input:  [<bos>, tôi, vui]        ← Feed to decoder
-        #   tgt_target: [tôi,   vui, <eos>]      ← Decoder should predict these
-        #               │       │     │
-        #               │       │     └─ At step 2: given [<bos>, tôi, vui], predict <eos>
-        #               │       └─ At step 1: given [<bos>, tôi], predict "vui"
-        #               └─ At step 0: given [<bos>], predict "tôi"
+        # UNDERSTANDING THE SLICING [:, :-1] and [:, 1:]:
+        # ─────────────────────────────────────────────────────────────────────
+        # 
+        # Python slicing syntax: tensor[:, start:end]
+        #   - First dimension (before comma): ":" means ALL batches
+        #   - Second dimension (after comma): which positions to select
+        #
+        # [:, :-1]  = All batches, positions from START to SECOND-TO-LAST
+        # [:, 1:]   = All batches, positions from SECOND to END
+        #
+        # VISUAL EXAMPLE with a batch of 2 sentences:
+        # ─────────────────────────────────────────────────────────────────────
+        #
+        # tgt_batch shape: (2, 5)  # batch_size=2, seq_len=5
+        #
+        #   Batch 0: [<bos>, "tôi", "vui", "lắm", <eos>]
+        #   Batch 1: [<bos>, "hello", "world", "!", <eos>]
+        #
+        # Applying [:, :-1] — "exclude the last column":
+        # ─────────────────────────────────────────────────────────────────────
+        #
+        #   Index:     0        1       2       3        4
+        #            [<bos>,  "tôi",  "vui",  "lắm",  <eos>]   ← Original
+        #              │        │       │       │       │
+        #              └────────┴───────┴───────┴───────┘
+        #                         KEEP (exclude last)
+        #
+        #   Result: [<bos>, "tôi", "vui", "lắm"]   # Shape: (2, 4)
+        #           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        #           All positions EXCEPT the last one
+        #
+        # Applying [:, 1:] — "exclude the first column":
+        # ─────────────────────────────────────────────────────────────────────
+        #
+        #   Index:     0        1       2       3        4
+        #            [<bos>,  "tôi",  "vui",  "lắm",  <eos>]   ← Original
+        #              │        │       │       │       │
+        #              └────────┴───────┴───────┴───────┘
+        #                         └───────┴───────┴───────┘
+        #                              KEEP (exclude first)
+        #
+        #   Result: ["tôi", "vui", "lắm", <eos>]   # Shape: (2, 4)
+        #           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        #           All positions EXCEPT the first one
+        #
+        # SIDE-BY-SIDE COMPARISON:
+        # ─────────────────────────────────────────────────────────────────────
+        #
+        #   Original:  [<bos>,  "tôi",  "vui",  "lắm",  <eos>]
+        #                         │       │       │       │
+        #   tgt_input:  [<bos>,  "tôi",  "vui",  "lắm"]      # [:, :-1] drop last
+        #                         │       │       │       │
+        #   tgt_target:         ["tôi",  "vui",  "lắm",  <eos>]  # [:, 1:] drop first
+        #
+        #   Notice: Each position in tgt_input aligns with the NEXT position in tgt_target
+        #
+        # WHY THIS ALIGNMENT?
+        # ─────────────────────────────────────────────────────────────────────
+        #
+        # The model learns to predict the NEXT token given all previous tokens:
+        #
+        #   Step 0: Given [<bos>],              predict "tôi"
+        #   Step 1: Given [<bos>, "tôi"],       predict "vui"
+        #   Step 2: Given [<bos>, "tôi", "vui"], predict "lắm"
+        #   Step 3: Given [<bos>, "tôi", "vui", "lắm"], predict <eos>
+        #
+        #   Input to decoder:  [<bos>, "tôi", "vui", "lắm"]
+        #   Target to predict: ["tôi", "vui", "lắm", <eos>]
+        #                         ↑       ↑       ↑       ↑
+        #                    (shifted left by 1 position)
+        #
+        # This is "teacher forcing" because during training we feed the CORRECT
+        # previous tokens (ground truth), not the model's own predictions.
         #
         # Why this works:
         #   - At each position i, decoder sees tokens 0..i and predicts token i+1
