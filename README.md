@@ -4,7 +4,7 @@ Build and train a Transformer model from the ground up, learning every component
 
 ## 📚 Learning Path
 
-Run each lesson in order. Each file is a standalone script with detailed explanations.
+Run each lesson in order. Each file is a standalone script with detailed explanations and comprehensive docstrings with examples.
 
 ```bash
 # Activate the virtual environment first:
@@ -128,6 +128,38 @@ Prevents the decoder from "looking ahead" at future tokens during training.
 | Cross-Attention | N/A | Yes (queries encoder) |
 | Purpose | Understand input | Generate output |
 
+### How Masking Works in MultiHeadAttention
+
+The masking mechanism is implemented in `MultiHeadAttention.forward()` and applies to the `seq_len × seq_len` attention scores matrix:
+
+```python
+# scores shape: (batch, n_heads, seq_len, seq_len)
+scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+
+# Apply mask: where mask=0, set score to -1e9 (negative infinity)
+if mask is not None:
+    scores = scores.masked_fill(mask == 0, -1e9)
+
+# After softmax, attention to masked positions becomes ~0
+attn = torch.softmax(scores, dim=-1)
+```
+
+**Mask Types:**
+
+1. **src_padding_mask** (Encoder): Masks padding positions in source
+   - Shape: `(batch, 1, 1, src_len)`
+   - Columns for pad positions get -1e9 → attention weights become 0.0
+
+2. **tgt_causal_mask** (Decoder self-attention): Lower triangular matrix
+   - Shape: `(tgt_len, tgt_len)`
+   - Upper triangle (future positions) masked with -1e9
+
+3. **Combined mask** (Decoder): `causal_mask AND padding_mask`
+   - Masks both future positions AND padding positions
+
+4. **src_padding_mask in Cross-Attention**: Decoder attending to encoder
+   - Same mechanism: encoder pad positions masked
+
 ## 🎯 Results
 
 Lesson 7 trains the Transformer to translate 28 tiny English→French sentences. After 200 epochs:
@@ -181,3 +213,28 @@ EN>
 - Comments explain every design decision
 - The training in Lesson 7 uses a tiny dataset (28 examples) for fast demonstration
 - Lesson 8 scales up to a real corpus (IWSLT EN↔VI) with subword tokenization and an interactive inference mode
+
+## 📚 Documentation
+
+All classes and functions include comprehensive docstrings with:
+- Detailed explanations of purpose and behavior
+- Parameter descriptions with types and shapes
+- Return value documentation
+- Practical code examples showing real usage
+
+To explore the documentation interactively in Python:
+
+```python
+from 08_iwslt_vi_en import MultiHeadAttention, Transformer
+
+# View class documentation
+help(MultiHeadAttention)
+help(MultiHeadAttention.forward)
+
+# View Transformer documentation
+help(Transformer)
+help(Transformer.encode)
+help(Transformer.decode)
+```
+
+Or use your IDE's built-in documentation viewer (e.g., hover over a class/function in VS Code).
