@@ -1971,7 +1971,98 @@ def generate_translation(model, src_text, en_vocab, vi_vocab, max_len: int = 50,
        - Q from decoder self-attention: (1, 4, 1, 16)
        - K, V from encoder_output: (1, 4, 5, 16)  # 5 source positions
        - attention scores: (1, 4, 1, 5)  # attend to 5 source tokens
-       - attention output: (1, 1, 64)
+       
+       HOW ATTENTION OUTPUT SHAPE IS COMPUTED:
+       ─────────────────────────────────────────────────────────────────────
+       
+       Step 1: Compute attention scores (Q @ K^T)
+         Q shape: (1, 4, 1, 16)   # (batch, heads, tgt_len, d_head)
+         K shape: (1, 4, 5, 16)   # (batch, heads, src_len, d_head)
+         K^T shape: (1, 4, 16, 5) # transpose last two dims
+         
+         scores = Q @ K^T / sqrt(d_k)
+         scores shape: (1, 4, 1, 5)  # (batch, heads, tgt_len, src_len)
+         
+         For each of the 4 heads, we get a 1×5 matrix:
+           - 1 = current decoder position (query position)
+           - 5 = 5 encoder positions (key positions to attend to)
+         
+         Example scores for head 0:
+           [[0.2, 0.5, 0.1, 0.8, 0.3]]  # raw dot products
+                       ↑
+                    highest = most relevant source position
+       
+       Step 2: Apply softmax to get attention weights
+         softmax(scores, dim=-1) normalizes each row to sum to 1.0
+         
+         attn_weights shape: (1, 4, 1, 5)
+         
+         Example for head 0 after softmax:
+           [[0.15, 0.25, 0.10, 0.35, 0.15]]  # sums to 1.0
+                       ↑
+                    highest weight = most attended position
+         
+         These weights tell us: "How much should position 0 of the decoder
+         attend to each of the 5 encoder positions?"
+       
+       Step 3: Weight values by attention (attn @ V)
+         attn_weights: (1, 4, 1, 5)
+         V shape:      (1, 4, 5, 16)  # (batch, heads, src_len, d_head)
+         
+         output = attn_weights @ V
+         
+         Matrix multiplication: (1, 4, 1, 5) @ (1, 4, 5, 16)
+                              = (1, 4, 1, 16)
+         
+         For each head, we compute a weighted sum of the 5 value vectors:
+           output[head_i] = 0.15 * V[0] + 0.25 * V[1] + 0.10 * V[2] 
+                          + 0.35 * V[3] + 0.15 * V[4]
+         
+         Each V[j] is a 16-dimensional vector, so the weighted sum is also
+         a 16-dimensional vector.
+       
+       Step 4: Merge heads back together
+         output shape: (1, 4, 1, 16)  # (batch, heads, tgt_len, d_head)
+         
+         _merge_heads() transposes and reshapes:
+           .transpose(1, 2) → (1, 1, 4, 16)
+           .contiguous().view(1, 1, 64) → (1, 1, 64)
+         
+         This concatenates the 4 heads (each 16-dim) into a single 64-dim vector:
+           [head_0 (16 dims) | head_1 (16 dims) | head_2 (16 dims) | head_3 (16 dims)]
+           = 64-dimensional output
+       
+       Step 5: Apply output linear projection
+         merged_output: (1, 1, 64)
+         W_O: (64, 64)  # nn.Linear(d_model, d_model)
+         
+         output = W_O(merged_output)
+         output shape: (1, 1, 64)  # final cross-attention output
+       
+       SUMMARY OF SHAPE TRANSFORMATIONS:
+       ─────────────────────────────────────────────────────────────────────
+       
+       Q: (1, 4, 1, 16)  K: (1, 4, 5, 16)  V: (1, 4, 5, 16)
+                          ↓
+       scores = Q @ K^T: (1, 4, 1, 5)   # "How much to attend to each source"
+                          ↓
+       attn = softmax(scores): (1, 4, 1, 5)  # Normalized weights
+                          ↓
+       attn @ V: (1, 4, 1, 16)  # Weighted sum of values
+                          ↓
+       merge_heads: (1, 1, 64)  # Concatenate 4 heads × 16 dims = 64 dims
+                          ↓
+       W_O projection: (1, 1, 64)  # Final cross-attention output
+       
+       KEY INSIGHT:
+       The attention mechanism computes a weighted sum of value vectors.
+       - Attention scores (1, 4, 1, 5) determine the weights
+       - Values (1, 4, 5, 16) are the vectors being weighted
+       - Output (1, 4, 1, 16) is the weighted sum per head
+       
+       Think of it as: "For decoder position 0, create a summary vector
+       by blending the 5 encoder value vectors according to relevance."
+       The blending weights come from how well each key matches the query.
     
     c) FFN:
        - Input: (1, 1, 64)
