@@ -1663,6 +1663,47 @@ def train_epoch(model, dataloader, optimizer, criterion, device, current_step: i
 
         optimizer.zero_grad()
 
+        # ─────────────────────────────────────────────────────────────────────
+        # TEACHER FORCING: How we train the decoder to generate sequences
+        # ─────────────────────────────────────────────────────────────────────
+        # 
+        # The Transformer decoder is trained to predict the NEXT token in a sequence.
+        # We use "teacher forcing" — feeding the ground truth as input, shifted by one.
+        #
+        # Example: Vietnamese sentence = "tôi vui" (I am happy)
+        # ─────────────────────────────────────────────────────────────────────
+        # 
+        # After tokenization with special tokens:
+        #   tgt_batch = [<bos>, tôi, vui, <eos>]  (length 4)
+        #               │       │    │     │
+        #               │       │    │     └─ End of sequence
+        #               │       │    └─ Token 2: "vui"
+        #               │       └─ Token 1: "tôi"  
+        #               └─ Start of sequence
+        #
+        # TEACHER FORCING SPLIT:
+        # ─────────────────────────────────────────────────────────────────────
+        # 
+        # tgt_input  = tgt_batch[:, :-1]   # Decoder INPUT (what decoder sees)
+        # tgt_target = tgt_batch[:, 1:]    # Decoder TARGET (what decoder should predict)
+        #
+        #   tgt_input:  [<bos>, tôi, vui]        ← Feed to decoder
+        #   tgt_target: [tôi,   vui, <eos>]      ← Decoder should predict these
+        #               │       │     │
+        #               │       │     └─ At step 2: given [<bos>, tôi, vui], predict <eos>
+        #               │       └─ At step 1: given [<bos>, tôi], predict "vui"
+        #               └─ At step 0: given [<bos>], predict "tôi"
+        #
+        # Why this works:
+        #   - At each position i, decoder sees tokens 0..i and predicts token i+1
+        #   - During training: we feed TRUE tokens (teacher forcing)
+        #   - During inference: we feed PREDICTED tokens (autoregressive)
+        #
+        # src_input: Source sentence (English) for encoder
+        #   - Encoder processes src_input to create contextual representations
+        #   - Decoder attends to these via cross-attention
+        # ─────────────────────────────────────────────────────────────────────
+        
         src_input = src_batch
         tgt_input = tgt_batch[:, :-1]
         tgt_target = tgt_batch[:, 1:]
